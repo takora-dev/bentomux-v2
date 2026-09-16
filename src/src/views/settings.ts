@@ -56,19 +56,25 @@ const PALETTE_SWATCH: Record<PaletteName, [string, string, string]> = {
   eink: ['#ffffff', '#000000', '#000000'],
 };
 
-function syncSeg(seg: HTMLElement, onIndex: 0 | 1): void {
-  const [first, second] = seg.children as HTMLCollectionOf<HTMLElement>;
-  first.classList.toggle('on', onIndex === 0);
-  second.classList.toggle('on', onIndex === 1);
+function syncSeg(seg: HTMLElement, onIndex: number): void {
+  Array.from(seg.children as HTMLCollectionOf<HTMLElement>).forEach((el, i) =>
+    el.classList.toggle('on', i === onIndex));
 }
 
 /* ---------------- Appearance ---------------- */
 
+function themeIndex(): number {
+  if (db.prefs.theme === 'light') return 0;
+  if (db.prefs.theme === 'dark') return 1;
+  return 2; /* 'system' or undefined */
+}
+
 function buildModeSeg(paint: () => void): HTMLElement {
   const seg = h('div', { class: 'seg' },
     h('button', { onclick: () => { setThemeMode('light'); paint(); } }, 'Light'),
-    h('button', { onclick: () => { setThemeMode('dark'); paint(); } }, 'Dark'));
-  syncSeg(seg, db.prefs.theme === 'dark' ? 1 : 0);
+    h('button', { onclick: () => { setThemeMode('dark'); paint(); } }, 'Dark'),
+    h('button', { onclick: () => { setThemeMode('system'); paint(); } }, 'System'));
+  syncSeg(seg, themeIndex());
   return seg;
 }
 

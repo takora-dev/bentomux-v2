@@ -56,7 +56,7 @@ function applyShellPrefs(): void {
   document.title = 'Bentomux';
   document.body.classList.toggle('pane-hidden', db.prefs.paneHidden === true);
   document.body.classList.toggle('git-panel-open', ui.gitPanelOpen);
-  document.documentElement.classList.toggle('dark', db.prefs.theme === 'dark');
+  document.documentElement.classList.toggle('dark', resolveTheme() === 'dark');
   applyPaletteClass(db.prefs.palette);
   applyFontPrefs();
   $('#sidebar').classList.toggle('open', ui.sidebarOpen);
@@ -133,18 +133,25 @@ function wireScrim(): void {
   $('#scrim').addEventListener('pointerdown', () => { ui.sidebarOpen = false; render(); });
 }
 
+/* Resolve actual dark/light from pref, falling back to OS for 'system'/undefined */
+export function resolveTheme(): 'light' | 'dark' {
+  if (db.prefs.theme === 'dark') return 'dark';
+  if (db.prefs.theme === 'light') return 'light';
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
 function toggleTheme(): void {
   db.prefs.theme = db.prefs.theme === 'dark' ? 'light' : 'dark';
   void window.bentomux.setPrefs({ theme: db.prefs.theme });
-  document.documentElement.classList.toggle('dark', db.prefs.theme === 'dark');
+  document.documentElement.classList.toggle('dark', resolveTheme() === 'dark');
   render(); /* terminals re-theme in place */
 }
 
-export function setThemeMode(mode: 'light' | 'dark'): void {
+export function setThemeMode(mode: 'light' | 'dark' | 'system'): void {
   if (db.prefs.theme === mode) return;
   db.prefs.theme = mode;
   void window.bentomux.setPrefs({ theme: mode });
-  document.documentElement.classList.toggle('dark', mode === 'dark');
+  document.documentElement.classList.toggle('dark', resolveTheme() === 'dark');
   render();
 }
 
@@ -342,6 +349,15 @@ function wireUpdateBanner(): void {
 async function boot(): Promise<void> {
   const bootStart = performance.now();
   setDb(await window.bentomux.getState());
+
+  /* Sync dark class when OS theme changes and user is on 'system' */
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (!db.prefs.theme || db.prefs.theme === 'system') {
+      document.documentElement.classList.toggle('dark', resolveTheme() === 'dark');
+      render();
+    }
+  });
+
   /* live subscriptions before anything renders */
   initTerminalEvents();
   window.bentomux.onBranch((wsId, branch) => {

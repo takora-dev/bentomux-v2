@@ -29,7 +29,7 @@ export type PaletteName = 'default' | 'catppuccin' | 'rose-pine' | 'gruvbox' | '
 export const PALETTES: PaletteName[] = ['default', 'catppuccin', 'rose-pine', 'gruvbox', 'dracula', 'nord', 'classic', 'eink'];
 
 export interface Prefs {
-  theme?: 'light' | 'dark';
+  theme?: 'light' | 'dark' | 'system';
   palette?: PaletteName;
   /* terminal font family (CSS font stack) + size in px; absent = built-in default */
   font?: string;
