@@ -711,12 +711,18 @@ pub fn start_tunnel(app: &tauri::AppHandle, port: u16) {
         *tunnel_error().lock().unwrap() = Some("cloudflared is not bundled for this platform and was not found on PATH. Install it from https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/ to enable public HTTPS.".to_string());
         return;
     };
-    let mut child = match std::process::Command::new(&bin)
-        .args(["tunnel", "--url", &format!("http://127.0.0.1:{port}")])
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.args(["tunnel", "--url", &format!("http://127.0.0.1:{port}")])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+        .stderr(std::process::Stdio::piped());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = match cmd.spawn()
     {
         Ok(c) => c,
         Err(e) => {
