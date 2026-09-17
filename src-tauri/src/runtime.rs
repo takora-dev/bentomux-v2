@@ -334,6 +334,23 @@ fn match_binary_name(name: &str) -> Option<&'static str> {
     None
 }
 
+/* The directory of an installed npm package inside a path — `@scope/pkg` for
+   a scoped package, `pkg` otherwise. When a shim hands the package entry point
+to the interpreter, the file name is a generic `cli.js`/`index.js` and only the
+package directory carries the agent name
+   (`node …\node_modules\@github\copilot\dist\index.js`). */
+fn npm_package_name(token: &str) -> Option<&str> {
+    const MARKER: &str = "node_modules/";
+    let tail = &token[token.rfind(MARKER)? + MARKER.len()..];
+    let mut segments = tail.split('/').filter(|segment| !segment.is_empty());
+    let first = segments.next()?;
+    if first.starts_with('@') {
+        segments.next()
+    } else {
+        Some(first)
+    }
+}
+
 fn match_agent(name: &str, cmd: Option<&str>) -> Option<&'static str> {
     if let Some(agent) = match_binary_name(name) {
         return Some(agent);
@@ -372,17 +389,22 @@ fn match_agent(name: &str, cmd: Option<&str>) -> Option<&'static str> {
     if c.contains("@google/gemini-cli") {
         return Some("gemini");
     }
-    /* Node CLIs that set `process.title` (pi, omp, …) replace their own
-       argv[0]: on macOS sysinfo then reports name="node" with the real
-       name stranded in the argument list ("pi BENTOMUX_BRIDGE=…"), and a
-       bare agent process never matched. Retry the binary-name patterns on
-       each bare argument token — path-carrying tokens are left alone, they
-       are what the explicit wrapper patterns above already cover. */
+    /* The agent name is not always a bare token. Node CLIs that set
+       `process.title` (pi, omp, …) replace their own argv[0], so on macOS
+       sysinfo reports name="node" with the real name stranded in the argument
+       list ("pi BENTOMUX_BRIDGE=…"); an interpreter-launched CLI keeps
+       argv[0]="node" instead and carries the launcher path
+       ("node /usr/local/bin/codex", measured). Retry the binary-name patterns
+       on the file name of every argument token, and on the npm package
+       directory of an installed package. */
     for token in c.split_whitespace() {
-        if token.contains('/') {
-            continue;
+        /* quote marks survive when the arg holding the path was quoted */
+        let token = token.trim_matches(|ch| ch == '"' || ch == '\'');
+        let file_name = token.rsplit('/').next().unwrap_or(token);
+        if let Some(agent) = match_binary_name(file_name) {
+            return Some(agent);
         }
-        if let Some(agent) = match_binary_name(token) {
+        if let Some(agent) = npm_package_name(token).and_then(match_binary_name) {
             return Some(agent);
         }
     }
@@ -651,8 +673,75 @@ mod tests {
         assert_eq!(match_agent("node", Some(".\\node_modules\\@openai\\codex")), Some("codex"));
         assert_eq!(match_agent("node", Some("@google/gemini-cli foo")), Some("gemini"));
         assert_eq!(match_agent("node", Some(".pi/agent run")), Some("pi"));
-        /* an embedded `claude-code` shared-name token is NOT a wrapper match */
-        assert_eq!(match_agent("node", Some("node /usr/local/bin/claude-code")), None);
+    }
+
+    /* measured: an npm shim on POSIX is a symlink to the package entry point,
+       but the kernel writes the *shim* path into argv[1], not the package path
+       (`node /usr/local/bin/codex --version`), so the file name of the
+       argument is what identifies the agent on macOS/Linux */
+    #[test]
+    fn match_agent_reads_launcher_paths() {
+        assert_eq!(
+            match_agent("node", Some("node /usr/local/bin/codex --version")),
+            Some("codex")
+        );
+        assert_eq!(match_agent("node", Some("node /usr/local/bin/gemini")), Some("gemini"));
+        assert_eq!(
+            match_agent("node", Some("node /usr/local/bin/claude-code")),
+            Some("claude")
+        );
+        assert_eq!(match_agent("node", Some("node /usr/local/bin/kimi")), Some("kimi"));
+        /* a python-based agent keeps the interpreter in argv[0] as well */
+        assert_eq!(
+            match_agent(
+                "python3",
+                Some(
+                    "/Users/mac/.hermes/hermes-agent/venv/bin/python3 /Users/mac/.hermes/hermes-agent/venv/bin/hermes"
+                )
+            ),
+            Some("hermes")
+        );
+        /* Windows `.cmd`/`.ps1` shims run under cmd.exe before node starts */
+        assert_eq!(
+            match_agent("cmd.exe", Some("C:/WINDOWS/system32/cmd.exe /d /c \"C:/Users/mac/AppData/Roaming/npm/droid.cmd\"")),
+            Some("droid")
+        );
+        /* a non-agent launcher path stays unmatched */
+        assert_eq!(
+            match_agent("node", Some("node /usr/lib/pipeline/index.js")),
+            None
+        );
+    }
+
+    /* when the shim passes the package entry point to node itself the file name
+       is a generic cli.js/index.js, so the npm package directory is the only
+       agent evidence — the shape Windows npm shims and `npm exec` produce */
+    #[test]
+    fn match_agent_reads_npm_package_dirs() {
+        assert_eq!(
+            match_agent("node", Some("node /usr/local/lib/node_modules/@openai/codex/bin/codex.js")),
+            Some("codex")
+        );
+        assert_eq!(
+            match_agent(
+                "node.exe",
+                Some(
+                    "\"C:\\Program Files\\nodejs\\node.exe\" \"C:\\Users\\mac\\AppData\\Roaming\\npm\\node_modules\\@github\\copilot\\dist\\index.js\""
+                )
+            ),
+            Some("copilot")
+        );
+        assert_eq!(
+            match_agent(
+                "node.exe",
+                Some("\"node.exe\" \"C:\\Users\\mac\\AppData\\Roaming\\npm\\node_modules\\@qwen-code\\qwen-code\\cli.js\"")
+            ),
+            Some("qwen")
+        );
+        assert_eq!(
+            match_agent("node", Some("node /app/node_modules/lodash/index.js")),
+            None
+        );
     }
 
     #[test]
@@ -719,8 +808,8 @@ mod tests {
             Some("pi")
         );
         assert_eq!(match_agent("node", Some("pi")), Some("pi"));
-        /* path-carrying arguments stay with the explicit wrapper patterns */
-        assert_eq!(match_agent("node", Some("node /usr/local/bin/pi")), None);
+        /* the launcher path is recognized too; pi itself rewrites argv[0] */
+        assert_eq!(match_agent("node", Some("node /usr/local/bin/pi")), Some("pi"));
         /* unrelated node processes stay unmatched */
         assert_eq!(match_agent("node", Some("node server.js --port 3000")), None);
         assert_eq!(match_agent("node", Some("node /usr/lib/pipeline/index.js")), None);
