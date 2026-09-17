@@ -307,7 +307,8 @@ fn minor_re() -> &'static regex::Regex {
     RE.get_or_init(|| regex::Regex::new(MINOR_RE).expect("valid minor-agent regex"))
 }
 
-fn match_agent(name: &str, cmd: Option<&str>) -> Option<&'static str> {
+/* one binary-name guess against the known-agent patterns */
+fn match_binary_name(name: &str) -> Option<&'static str> {
     /* process names are lowercase in practice — only allocate when they aren't */
     let n: Cow<'_, str> = if name.bytes().any(|b| b.is_ascii_uppercase()) {
         Cow::Owned(name.to_lowercase())
@@ -319,11 +320,34 @@ fn match_agent(name: &str, cmd: Option<&str>) -> Option<&'static str> {
             return Some(agent);
         }
     }
+    if let Some(m) = minor_re().captures(&n) {
+        return Some(match m.get(1).unwrap().as_str() {
+            "qwenpaw" => "qwenpaw",
+            "qwen" => "qwen",
+            "kimi" => "kimi",
+            "kilo" => "kilo",
+            "droid" => "droid",
+            "amp" => "amp",
+            _ => unreachable!(),
+        });
+    }
+    None
+}
+
+fn match_agent(name: &str, cmd: Option<&str>) -> Option<&'static str> {
+    if let Some(agent) = match_binary_name(name) {
+        return Some(agent);
+    }
     /* the command-line pass is only reached when the binary name gave no
-       answer, so the lowercased cmd string is built lazily here */
-    let c = cmd.map(|s| s.to_lowercase()).unwrap_or_default();
+       answer, so the lowercased cmd string is built lazily here. Backslashes
+       are folded to `/` so the Windows PEB command line (which keeps the
+       `@scope\pkg` install path as written by the npm shim) matches the same
+       patterns as a POSIX argv. */
+    let c = cmd
+        .map(|s| s.to_lowercase().replace('\\', "/"))
+        .unwrap_or_default();
     /* npm-wrapper invocations only visible in the command line */
-    if c.contains("@anthropic-ai/claude-code") || c.contains("@anthropic-ai\\claude-code") {
+    if c.contains("@anthropic-ai/claude-code") {
         return Some("claude");
     }
     /* (^|[\\/"])claude(\.exe)?(["']?\s|$) on the first 240 chars */
@@ -335,30 +359,32 @@ fn match_agent(name: &str, cmd: Option<&str>) -> Option<&'static str> {
     }
     if c.contains("@earendil-works/pi-coding-agent")
         || c.contains("@mariozechner/pi-coding-agent")
-        || c.contains(".pi/agent") || c.contains(".pi\\agent")
+        || c.contains(".pi/agent")
     {
         return Some("pi");
     }
-    if c.contains("@openai/codex") || c.contains("@openai\\codex") {
+    if c.contains("@openai/codex") {
         return Some("codex");
     }
-    if c.contains("oh-my-pi") || c.contains("oh_my_pi") || c.contains("/omp") || c.contains("\\\\omp") {
+    if c.contains("oh-my-pi") || c.contains("oh_my_pi") || c.contains("/omp") {
         return Some("omp");
     }
-    if c.contains("@google/gemini-cli") || c.contains("@google\\gemini-cli") {
+    if c.contains("@google/gemini-cli") {
         return Some("gemini");
     }
-    /* minor agents via the unified name regex */
-    if let Some(m) = minor_re().captures(&n) {
-        return Some(match m.get(1).unwrap().as_str() {
-            "qwenpaw" => "qwenpaw",
-            "qwen" => "qwen",
-            "kimi" => "kimi",
-            "kilo" => "kilo",
-            "droid" => "droid",
-            "amp" => "amp",
-            _ => unreachable!(),
-        });
+    /* Node CLIs that set `process.title` (pi, omp, …) replace their own
+       argv[0]: on macOS sysinfo then reports name="node" with the real
+       name stranded in the argument list ("pi BENTOMUX_BRIDGE=…"), and a
+       bare agent process never matched. Retry the binary-name patterns on
+       each bare argument token — path-carrying tokens are left alone, they
+       are what the explicit wrapper patterns above already cover. */
+    for token in c.split_whitespace() {
+        if token.contains('/') {
+            continue;
+        }
+        if let Some(agent) = match_binary_name(token) {
+            return Some(agent);
+        }
     }
     None
 }
@@ -683,11 +709,70 @@ mod tests {
         assert!(deepest_match(1, &parent_map(&procs)).is_none());
     }
 
+    /* macOS: pi sets process.title, so sysinfo reports name="node" and the
+       real name lands in the argument list — the tab used to read as "shell"
+       unless a grandchild happened to carry ".pi/agent" in its argv */
+    #[test]
+    fn match_agent_reads_title_rewritten_pi() {
+        assert_eq!(
+            match_agent("node", Some("pi BENTOMUX_BRIDGE=/tmp/bentomux-bridge.sock")),
+            Some("pi")
+        );
+        assert_eq!(match_agent("node", Some("pi")), Some("pi"));
+        /* path-carrying arguments stay with the explicit wrapper patterns */
+        assert_eq!(match_agent("node", Some("node /usr/local/bin/pi")), None);
+        /* unrelated node processes stay unmatched */
+        assert_eq!(match_agent("node", Some("node server.js --port 3000")), None);
+        assert_eq!(match_agent("node", Some("node /usr/lib/pipeline/index.js")), None);
+    }
+
     #[test]
     fn match_agent_recognizes_omp_and_pi_wrappers() {
         assert_eq!(match_agent("omp", None), Some("omp"));
         assert_eq!(match_agent("node", Some("node ./oh-my-pi/bin/omp")), Some("omp"));
         assert_eq!(match_agent("node", Some("node @mariozechner/pi-coding-agent")), Some("pi"));
+    }
+
+    /* Windows: `process.title` only renames the console (libuv calls
+       SetConsoleTitleW), so sysinfo reports the real image name "node.exe" and
+       the npm shim's backslash install path is the only agent evidence */
+    #[test]
+    fn match_agent_reads_windows_npm_shim_paths() {
+        assert_eq!(
+            match_agent(
+                "node.exe",
+                Some(
+                    "\"C:\\Program Files\\nodejs\\node.exe\" \"C:\\Users\\mac\\AppData\\Roaming\\npm\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js\""
+                )
+            ),
+            Some("pi")
+        );
+        assert_eq!(
+            match_agent(
+                "node.exe",
+                Some("\"node.exe\" \"C:\\Users\\mac\\.pi\\agent\\npm\\node_modules\\pi-intercom\\dist\\cli.js\"")
+            ),
+            Some("pi")
+        );
+        assert_eq!(
+            match_agent(
+                "node.exe",
+                Some("\"node.exe\" \"C:\\Users\\mac\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js\"")
+            ),
+            Some("claude")
+        );
+        /* plain node processes under Windows still resolve to nothing */
+        assert_eq!(
+            match_agent("node.exe", Some("\"node.exe\" \"C:\\app\\server.js\"")),
+            None
+        );
+    }
+
+    /* Linux: libuv's uv_set_process_title calls prctl(PR_SET_NAME), so
+       /proc/<pid>/stat comm — what sysinfo reads as the name — becomes "pi" */
+    #[test]
+    fn match_agent_reads_linux_prctl_name() {
+        assert_eq!(match_agent("pi", Some("pi --resume")), Some("pi"));
     }
 
     #[test]
