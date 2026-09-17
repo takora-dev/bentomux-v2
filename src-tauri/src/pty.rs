@@ -379,22 +379,43 @@ mod tests {
 
         /* echo a marker and expect it back through the pty. \r submits the
            line the way a real Enter keystroke does (\n alone does not in
-           cmd/PowerShell); bash tolerates the trailing \r. */
-        mgr.write_term(&id, "echo BENTOMUX_TEST_MARKER\r\n").expect("write");
-        let mut saw_marker = false;
-        for _ in 0..50 {
+           cmd/PowerShell); bash tolerates the trailing \r.
+
+           Reading accumulates every chunk: ConPTY renders the screen and
+           splits one echoed line across several reads, so a per-chunk check
+           misses a marker that did arrive. Silence is not failure either --
+           the first cmd/PowerShell prompt can take a while on a cold CI
+           runner, and ConPTY drops input written before the client attaches,
+           so a quiet gap re-sends the command instead of giving up. */
+        let command = "echo BENTOMUX_TEST_MARKER\r\n";
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut seen = String::new();
+        let mut last_write: Option<std::time::Instant> = None;
+        while !seen.contains("BENTOMUX_TEST_MARKER") {
+            if std::time::Instant::now() >= deadline {
+                panic!("marker never appeared in pty output; saw {seen:?}");
+            }
             match tokio::time::timeout(std::time::Duration::from_millis(200), data_rx.recv()).await {
                 Ok(Ok((tid, chunk))) => {
                     assert_eq!(tid, id);
-                    if chunk.contains("BENTOMUX_TEST_MARKER") {
-                        saw_marker = true;
-                        break;
+                    seen.push_str(&chunk);
+                }
+                /* this test's own receiver can only lag by ignoring the stream */
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+                /* channel closed: nothing more will ever arrive */
+                Ok(Err(_)) => break,
+                Err(_) => {
+                    let due = last_write
+                        .map(|at: std::time::Instant| at.elapsed() >= std::time::Duration::from_secs(2))
+                        .unwrap_or(true);
+                    if due {
+                        mgr.write_term(&id, command).expect("write");
+                        last_write = Some(std::time::Instant::now());
                     }
                 }
-                _ => break,
             }
         }
-        assert!(saw_marker, "marker never appeared in pty output");
+        assert!(seen.contains("BENTOMUX_TEST_MARKER"));
 
         mgr.kill_term(&id);
         let exited = tokio::time::timeout(std::time::Duration::from_secs(5), exit_rx.recv()).await;
