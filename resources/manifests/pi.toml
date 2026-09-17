@@ -1,13 +1,43 @@
 id = "pi"
-version = "2026.06.10.1"
+version = "2026.09.17.1"
 min_engine_version = 1
-updated_at = "2026-06-10T00:00:00Z"
+updated_at = "2026-09-17T00:00:00Z"
 aliases = ["herdr:pi"]
 
+# Verified against @earendil-works/pi-coding-agent dist source
+# (modes/interactive/interactive-mode.js + components/status-indicator.js
+# + pi-tui Loader):
+#
+# - While a turn runs pi draws a live braille-spinner status line at the
+#   bottom: "<spinner> <message>" where the spinner cycles
+#   ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ and the message is "Working",
+#   "Working (<key> to interrupt)", "Thinking...", "Compacting
+#   context... (<key> to cancel)", "Retrying (n/m) in Ns... (<key> to
+#   cancel)", "Summarizing branch... (<key> to cancel)", or a custom
+#   extension message. The Loader always draws its spinner frame, so the
+#   spinner-anchored line is the reliable live signal.
+# - When idle the editor goes quiet and the dim two-line footer remains:
+#   the cwd line plus the stats line ("↑.. ↓.. .. NN.N%/CTX .. model").
+# - The OSC title ("π - <cwd>") is static — no spinner — so it carries
+#   no state signal.
+#
+# Both rules are scoped to the bottom lines on purpose: transcript
+# history must never impersonate a live turn. The previous whole_recent
+# "Working..." rule stuck on still-visible history text and reported
+# phantom working while the agent sat idle.
+
 [[rules]]
-id = "working_literal"
+id = "spinner_status_working"
 state = "working"
-priority = 100
-region = "whole_recent"
+priority = 900
+region = "bottom_non_empty_lines(5)"
 visible_working = true
-contains = ["Working..."]
+line_regex = ['^\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+\S', '─{1,2} [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]', '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]─']
+
+[[rules]]
+id = "footer_stats_idle"
+state = "idle"
+priority = 800
+region = "bottom_non_empty_lines(5)"
+visible_idle = true
+regex = ['(\d+(\.\d+)?%|\?)/\S+']

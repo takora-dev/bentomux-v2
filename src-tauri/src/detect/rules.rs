@@ -95,6 +95,10 @@ fn region_text(region: &RegionName, screen: &ScreenInput) -> (String, Vec<String
 pub struct Matcher {
     pub contains: Option<Vec<String>>,
     pub regex: Option<Vec<String>>,
+    /* TOML manifests author this as `line_regex` (snake_case); the struct
+       renames to camelCase for JSON compat, so accept both spellings or
+       every TOML line_regex rule is silently dropped on deserialize */
+    #[serde(alias = "line_regex")]
     pub line_regex: Option<Vec<String>>,
     pub any: Option<Vec<Matcher>>,
     pub all: Option<Vec<Matcher>>,
@@ -325,6 +329,18 @@ mod tests {
             lines: vec!["DO YOU WANT TO PROCEED?".to_string()],
         });
         assert_eq!(d.state, Some(RunState::Blocked));
+    }
+
+    /* TOML manifests spell this key `line_regex` (snake_case) while the
+       struct serializes as camelCase for JSON IPC — the alias must keep
+       both spellings live, or every TOML line_regex rule is silently
+       dropped on deserialize (19 of 21 manifests hit this) */
+    #[test]
+    fn matcher_accepts_snake_case_line_regex() {
+        let parsed: Matcher = toml::from_str(r#"line_regex = ['^\s*❯']"#).expect("snake_case must parse");
+        assert_eq!(parsed.line_regex, Some(vec!["^\\s*❯".to_string()]));
+        let parsed: Matcher = toml::from_str(r#"lineRegex = ['^\s*❯']"#).expect("camelCase must parse");
+        assert_eq!(parsed.line_regex, Some(vec!["^\\s*❯".to_string()]));
     }
 
     /* the compiled-regex cache is on the 1 Hz tick path; a pattern that fails

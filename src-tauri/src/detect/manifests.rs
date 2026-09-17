@@ -1,8 +1,10 @@
 /* ---------------- per-agent screen manifests ----------------
    Rule strings for Claude Code are ported from herdr's bundled
    manifest (github.com/herdrdev/herdr, src/detect/manifests/claude.toml).
-   Agents without a verified manifest (pi, codex, …) are identified at the
-   process level and fall back to output-activity state in runtime.rs. */
+   The pi manifest is verified against the installed
+   @earendil-works/pi-coding-agent dist source (spinner-anchored working
+   line + footer-stats idle line, both scoped to the bottom lines so
+   transcript history can never impersonate a live turn). */
 
 use super::rules::{Matcher, RegionName, Rule, RunState, S};
 
@@ -328,5 +330,40 @@ mod tests {
             let manifest = manifest_for(agent).expect("manifest should load");
             assert!(!manifest.rules.is_empty(), "{agent} has no rules");
         }
+    }
+    #[test]
+    fn pi_history_must_not_read_as_working() {
+        /* the reported bug: a stale "Working" line still visible in the
+           transcript kept the tab on working while the agent sat idle.
+           The old whole_recent rule matched it anywhere in the viewport;
+           the scoped rule must only fire inside the bottom lines, and the
+           footer stats line must read as idle. */
+        let m = manifest_for("pi").expect("pi manifest");
+        let idle_with_history = evaluate(&m, &ScreenInput {
+            osc_title: String::new(),
+            osc_progress: String::new(),
+            lines: vec![
+                "⠋ Working (esc to interrupt)".to_string(),
+                "done, edited foo.ts".to_string(),
+                "ran tests: 12 passed".to_string(),
+                "anything else?".to_string(),
+                "sure, go ahead".to_string(),
+                "all done".to_string(),
+                "~/proj (main)".to_string(),
+                "↑1.2k ↓800 12.4%/200k  my-model".to_string(),
+            ],
+        });
+        assert_eq!(idle_with_history.state, Some(RunState::Idle), "got {:?}", idle_with_history.rule_id);
+        let live = evaluate(&m, &ScreenInput {
+            osc_title: String::new(),
+            osc_progress: String::new(),
+            lines: vec![
+                "editing foo.ts".to_string(),
+                "~/proj (main)".to_string(),
+                "↑1.2k ↓800 12.4%/200k  my-model".to_string(),
+                "⠙ Working (esc to interrupt)".to_string(),
+            ],
+        });
+        assert_eq!(live.state, Some(RunState::Working));
     }
 }

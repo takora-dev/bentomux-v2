@@ -451,13 +451,6 @@ fn status_for(tab_id: &str, match_: Option<Match>) -> RuntimeStatus {
     };
 
     let det = rules::evaluate(manifest, &rules::ScreenInput { osc_title, osc_progress, lines });
-    if det.state.is_none() && m.agent == "pi" {
-        let working = !input_is_recent(tab_id)
-            && now_ms().saturating_sub(last_data_at) < WORKING_PULSE_MS;
-        base.state = Some(if working { AgentRunState::Working } else { AgentRunState::Idle });
-        base.source = Some("activity".to_string());
-        return base;
-    }
 
 
     if det.skip_state_update {
