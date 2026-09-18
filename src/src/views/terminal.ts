@@ -86,6 +86,21 @@ function monoFont(): string {
   return fallback;
 }
 
+function repaintTerminals(): void {
+  if (document.visibilityState !== 'visible') return;
+  requestAnimationFrame(() => {
+    for (const live of lives.values()) {
+      if (!live.host.isConnected || parking.contains(live.host)) continue;
+      try {
+        live.fit.fit();
+        live.term.refresh(0, Math.max(0, live.term.rows - 1));
+      } catch {
+        /* terminal may be between tab mounts */
+      }
+    }
+  });
+}
+
 const DEFAULT_TERM_FONT_SIZE = 12.5;
 
 function termFontSize(): number {
@@ -105,6 +120,8 @@ export function applyTerminalFont(): void {
 
 export function initTerminalEvents(): void {
   parking = $('#termParking');
+  window.addEventListener('focus', repaintTerminals);
+  document.addEventListener('visibilitychange', repaintTerminals);
   window.bentomux.onPtyData((id, chunk) => {
     const live = lives.get(id);
 
@@ -311,10 +328,20 @@ function observe(container: HTMLElement, live: Live): void {
   requestAnimationFrame(() => {
     if (live.observer) live.observer.disconnect();
     live.observer = new ResizeObserver(() => {
-      try { live.fit.fit(); } catch { /* not laid out yet */ }
+      try {
+        live.fit.fit();
+        live.term.refresh(0, Math.max(0, live.term.rows - 1));
+      } catch {
+        /* not laid out yet */
+      }
     });
     live.observer.observe(container);
-    try { live.fit.fit(); } catch { /* tiny container on first paint */ }
+    try {
+      live.fit.fit();
+      live.term.refresh(0, Math.max(0, live.term.rows - 1));
+    } catch {
+      /* tiny container on first paint */
+    }
   });
 }
 
