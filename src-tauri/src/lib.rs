@@ -30,6 +30,16 @@ pub fn run() {
     let app_state = state::AppStateManager::new(state::AppStateManager::pre_build_path());
     let mut builder = tauri::Builder::default();
     builder = builder
+        /* must be the first plugin: a second launch has to bail out before it
+           touches the store or the pty host daemon */
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            use tauri::Manager;
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.unminimize();
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())

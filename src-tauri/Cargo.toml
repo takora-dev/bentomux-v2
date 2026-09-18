@@ -49,6 +49,9 @@ flate2 = "1"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-opener = "2"
+# one daemon and one bentomux.json per machine: a second launch focuses the
+# window the user already has instead of racing it for both
+tauri-plugin-single-instance = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_System_Pipes", "Win32_Storage_FileSystem"] }
