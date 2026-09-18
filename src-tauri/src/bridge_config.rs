@@ -9,7 +9,7 @@ pub const BRIDGE_ADDR_ENV: &str = "BENTOMUX_BRIDGE";
 
 /* dev instances with an isolated store (BENTOMUX_USER_DATA_SUFFIX / smoke)
    get their own address so hook events never cross between instances */
-fn instance_suffix() -> String {
+pub fn instance_suffix() -> String {
     if std::env::var_os("BENTOMUX_SMOKE").is_some() {
         "-smoke".to_string()
     } else {

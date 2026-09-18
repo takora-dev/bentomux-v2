@@ -1,0 +1,707 @@
+/* ---------------- persistent pty host ----------------
+   A PTY dies with whoever owns its master fd: when the UI process exited the
+   fd closed, the kernel hung up the slave, and every agent CLI in a pane got
+   SIGHUP. So the master fds live in a separate daemon instead — the app runs
+   `bentomux --pty-host` on first use and talks to it over the same transport
+   bridge.rs uses (unix socket on unix, named pipe on windows). Quitting,
+   crashing, or force-quitting the app now leaves the agent CLIs running; the
+   next launch lists the live terms and reattaches to them.
+
+   Protocol: newline-delimited JSON, one line per message, base64 for the two
+   byte-carrying fields. Requests carry an `n` id the reply echoes back.
+   (ponytail: JSON+base64 costs ~33% on the pty hot path; a binary framing is
+   the upgrade path if a benchmark ever says the encode matters.) */
+
+use std::collections::{HashMap, VecDeque};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use serde_json::{json, Value};
+
+use crate::bridge_config::{bridge_env_for, instance_suffix};
+use crate::pty::{decode_pty_bytes, new_term_id};
+use crate::shell::resolve_shell;
+
+/* argv flag that turns this binary into the daemon instead of the app */
+pub const HOST_FLAG: &str = "--pty-host";
+
+/* bumped whenever the message shapes below change. The app refuses to drive a
+   daemon that answers with a different number: a daemon outlives app updates,
+   so a silent mismatch would surface as confusing misbehaviour in the field
+   with nothing to diagnose it. */
+pub const PROTOCOL_VERSION: u64 = 1;
+
+/* bytes of scrollback kept per pane for replay on reattach. The renderer's
+   xterm holds 1000 lines; 1 MiB covers far more than a full repaint. */
+const RING_MAX: usize = 1 << 20;
+
+/* how long to wait for the freshly spawned daemon to accept a connection */
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
+
+/* idle ticks (1s each) before a daemon with no live pane and no client exits */
+const IDLE_TICKS: u32 = 10;
+
+/* ---------------- address ---------------- */
+
+pub fn host_address() -> String {
+    if cfg!(windows) {
+        format!("\\\\.\\pipe\\bentomux-pty{}", instance_suffix())
+    } else {
+        std::env::temp_dir()
+            .join(format!("bentomux-pty{}.sock", instance_suffix()))
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+fn log_path() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("bentomux-pty{}.log", instance_suffix()))
+}
+
+/* ---------------- client transport ---------------- */
+
+pub struct HostStream {
+    pub reader: Box<dyn BufRead + Send>,
+    pub writer: Box<dyn Write + Send>,
+}
+
+#[cfg(unix)]
+fn open_stream(addr: &str) -> std::io::Result<HostStream> {
+    let stream = std::os::unix::net::UnixStream::connect(addr)?;
+    let writer = stream.try_clone()?;
+    Ok(HostStream { reader: Box::new(BufReader::new(stream)), writer: Box::new(writer) })
+}
+
+#[cfg(windows)]
+fn open_stream(addr: &str) -> std::io::Result<HostStream> {
+    let file = std::fs::OpenOptions::new().read(true).write(true).open(addr)?;
+    let writer = file.try_clone()?;
+    Ok(HostStream { reader: Box::new(BufReader::new(file)), writer: Box::new(writer) })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_stream(_addr: &str) -> std::io::Result<HostStream> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no pty host transport"))
+}
+
+/* connect to a specific daemon address (tests use a private one) */
+pub fn connect_at(addr: &str) -> Result<HostStream, String> {
+    open_stream(addr).map_err(|e| format!("pty host unreachable at {addr}: {e}"))
+}
+
+/* connect to the daemon, starting it if nothing is listening yet. The flag is
+   true when this call started the daemon, which tells the caller the daemon is
+   already current and must not be restarted. */
+pub fn connect_host() -> Result<(HostStream, bool), String> {
+    let addr = host_address();
+    if let Ok(stream) = open_stream(&addr) {
+        return Ok((stream, false));
+    }
+    spawn_host_process()?;
+    let deadline = Instant::now() + CONNECT_TIMEOUT;
+    loop {
+        match open_stream(&addr) {
+            Ok(stream) => return Ok((stream, true)),
+            Err(error) => {
+                if Instant::now() >= deadline {
+                    return Err(format!("pty host unreachable at {addr}: {error}"));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+fn spawn_host_process() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe failed: {}", e))?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg(HOST_FLAG);
+    cmd.stdin(std::process::Stdio::null());
+    /* the daemon outlives the app, so it cannot keep the app's stdio: give it
+       its own log file to keep startup failures diagnosable */
+    let log = log_path();
+    match std::fs::File::create(&log) {
+        Ok(file) => match file.try_clone() {
+            Ok(second) => {
+                cmd.stdout(file);
+                cmd.stderr(second);
+            }
+            Err(_) => {
+                cmd.stdout(std::process::Stdio::null());
+                cmd.stderr(std::process::Stdio::null());
+            }
+        },
+        Err(_) => {
+            cmd.stdout(std::process::Stdio::null());
+            cmd.stderr(std::process::Stdio::null());
+        }
+    }
+    /* its own process group: a Ctrl+C or terminal hangup aimed at the app's
+       group must not take the agent CLIs down with it */
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
+    }
+    cmd.spawn().map_err(|e| format!("pty host spawn failed: {}", e))?;
+    Ok(())
+}
+
+/* ---------------- replay ring ---------------- */
+
+struct Ring {
+    buf: VecDeque<u8>,
+    truncated: bool,
+}
+
+impl Ring {
+    fn new() -> Self {
+        Ring { buf: VecDeque::new(), truncated: false }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        if bytes.len() >= RING_MAX {
+            self.buf.clear();
+            self.buf.extend(&bytes[bytes.len() - RING_MAX..]);
+            self.truncated = true;
+            return;
+        }
+        let overflow = (self.buf.len() + bytes.len()).saturating_sub(RING_MAX);
+        if overflow > 0 {
+            self.buf.drain(..overflow);
+            self.truncated = true;
+        }
+        self.buf.extend(bytes);
+    }
+
+    fn replay(&self) -> Vec<u8> {
+        let mut out: Vec<u8> = self.buf.iter().copied().collect();
+        if self.truncated {
+            /* a full ring starts mid-stream, possibly inside an escape
+               sequence; resuming at the next line start keeps the parser sane
+               (a partial CSI would otherwise swallow the text after it) */
+            if let Some(nl) = out.iter().position(|&b| b == b'\n') {
+                out.drain(..=nl);
+            }
+        }
+        out
+    }
+}
+
+/* ---------------- daemon state ---------------- */
+
+/* the hot path (pty reader thread) only ever touches this, never the term map */
+struct TermShared {
+    id: String,
+    workspace_id: String,
+    pid: u32,
+    alive: AtomicBool,
+    attached: AtomicBool,
+    ring: Mutex<Ring>,
+}
+
+struct HostTerm {
+    shared: Arc<TermShared>,
+    /* held open for resize, and to keep the slave from hanging up: dropping
+       the master kills the child, which is why it lives in the daemon */
+    master: Box<dyn MasterPty + Send>,
+    writer: Mutex<Box<dyn Write + Send>>,
+    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+}
+
+/* the app is the only real client, but a connection is served on its own
+   thread so a second one can take over immediately instead of queueing behind
+   a client that never closed cleanly. The newest connection wins; the older
+   one keeps its socket but receives nothing. */
+struct ClientSlot {
+    generation: u64,
+    tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+}
+
+struct Host {
+    terms: Mutex<HashMap<String, HostTerm>>,
+    client: Mutex<ClientSlot>,
+}
+
+impl Host {
+    fn new() -> Self {
+        Host {
+            terms: Mutex::new(HashMap::new()),
+            client: Mutex::new(ClientSlot { generation: 0, tx: None }),
+        }
+    }
+
+    /* become the active client; returns the generation to clear later */
+    fn set_client(&self, tx: tokio::sync::mpsc::UnboundedSender<String>) -> u64 {
+        let generation = {
+            let mut slot = self.client.lock().unwrap();
+            slot.generation += 1;
+            slot.tx = Some(tx);
+            slot.generation
+        };
+        /* a fresh client has not asked for any pane yet, so stop streaming:
+           otherwise live chunks arrive before the replay that `attach` sends
+           and land on the renderer out of order */
+        for term in self.terms.lock().unwrap().values() {
+            term.shared.attached.store(false, Ordering::SeqCst);
+        }
+        generation
+    }
+
+    /* only the active client clears the slot: a superseded one must not */
+    fn clear_client(&self, generation: u64) {
+        let mut slot = self.client.lock().unwrap();
+        if slot.generation == generation {
+            slot.tx = None;
+        }
+    }
+
+    fn client_connected(&self) -> bool {
+        self.client.lock().unwrap().tx.is_some()
+    }
+}
+
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn unb64(text: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(text).ok()
+}
+
+fn send_json(host: &Host, value: Value) {
+    let mut line = value.to_string();
+    line.push('\n');
+    let tx = host.client.lock().unwrap().tx.clone();
+    if let Some(tx) = tx {
+        let _ = tx.send(line); /* a dead client is noticed by the reader loop */
+    }
+}
+
+fn reply(host: &Host, n: u64, mut value: Value) {
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("n".to_string(), json!(n));
+    }
+    send_json(host, value);
+}
+
+fn send_data(host: &Host, id: &str, bytes: &[u8]) {
+    send_json(host, json!({ "t": "data", "id": id, "data": b64(bytes) }));
+}
+
+fn term_list(host: &Host) -> Value {
+    let terms = host.terms.lock().unwrap();
+    Value::Array(
+        terms
+            .values()
+            .map(|t| {
+                json!({
+                    "id": t.shared.id,
+                    "workspaceId": t.shared.workspace_id,
+                    "pid": t.shared.pid,
+                    "alive": t.shared.alive.load(Ordering::SeqCst),
+                })
+            })
+            .collect(),
+    )
+}
+
+/* ---------------- request handling ---------------- */
+
+fn handle_line(host: &Arc<Host>, line: &str) {
+    let Ok(msg) = serde_json::from_str::<Value>(line) else { return };
+    let kind = msg.get("t").and_then(Value::as_str).unwrap_or("");
+    let id = msg.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+    let n = msg.get("n").and_then(Value::as_u64).unwrap_or(0);
+
+    match kind {
+        "list" => {
+            let terms = term_list(host);
+            reply(host, n, json!({ "t": "terms", "v": PROTOCOL_VERSION, "terms": terms }));
+        }
+        "spawn" => {
+            let workspace_id = msg.get("workspaceId").and_then(Value::as_str).unwrap_or("").to_string();
+            let path = msg.get("path").and_then(Value::as_str).unwrap_or("").to_string();
+            let shell = msg.get("shell").and_then(Value::as_str).map(str::to_string);
+            match spawn_term(host, &workspace_id, &path, shell.as_deref()) {
+                Ok((term_id, pid)) => reply(
+                    host,
+                    n,
+                    json!({
+                        "t": "spawned",
+                        "id": term_id,
+                        "pid": pid,
+                        "workspaceId": workspace_id,
+                        "alive": true,
+                    }),
+                ),
+                Err(error) => reply(host, n, json!({ "t": "error", "id": id, "message": error })),
+            }
+        }
+        "attach" => {
+            let shared = host.terms.lock().unwrap().get(&id).map(|t| t.shared.clone());
+            if let Some(shared) = shared {
+                shared.attached.store(true, Ordering::SeqCst);
+                let replay = shared.ring.lock().unwrap().replay();
+                if !replay.is_empty() {
+                    send_data(host, &shared.id, &replay);
+                }
+            }
+        }
+        "write" => {
+            let Some(bytes) = msg.get("data").and_then(Value::as_str).and_then(unb64) else { return };
+            let terms = host.terms.lock().unwrap();
+            if let Some(term) = terms.get(&id) {
+                let mut writer = term.writer.lock().unwrap();
+                let _ = writer.write_all(&bytes);
+                let _ = writer.flush();
+            }
+        }
+        "resize" => {
+            let cols = msg.get("cols").and_then(Value::as_u64).unwrap_or(80) as u16;
+            let rows = msg.get("rows").and_then(Value::as_u64).unwrap_or(24) as u16;
+            let terms = host.terms.lock().unwrap();
+            if let Some(term) = terms.get(&id) {
+                let _ = term.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+            }
+        }
+        "kill" => {
+            let removed = host.terms.lock().unwrap().remove(&id);
+            if let Some(term) = removed {
+                if term.shared.alive.load(Ordering::SeqCst) {
+                    let _ = term.killer.lock().unwrap().kill();
+                }
+            }
+        }
+        /* the app is about to replace the binary on disk (windows installer
+           cannot overwrite a running exe): drop everything and get out */
+        "shutdown" => {
+            let terms: Vec<HostTerm> = host.terms.lock().unwrap().drain().map(|(_, t)| t).collect();
+            for term in terms {
+                if term.shared.alive.load(Ordering::SeqCst) {
+                    let _ = term.killer.lock().unwrap().kill();
+                }
+            }
+            std::process::exit(0);
+        }
+        _ => {}
+    }
+}
+
+/* ---------------- pty lifecycle ---------------- */
+
+fn spawn_term(
+    host: &Arc<Host>,
+    workspace_id: &str,
+    path: &str,
+    shell_pref: Option<&str>,
+) -> Result<(String, u32), String> {
+    let shell = resolve_shell(shell_pref);
+    let id = new_term_id();
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .map_err(|e| format!("PTY creation failed: {}", e))?;
+
+    let mut cmd = CommandBuilder::new(&shell.file);
+    for arg in &shell.args {
+        cmd.arg(arg);
+    }
+    cmd.cwd(path);
+    cmd.env("TERM", "xterm-256color");
+    for (k, v) in bridge_env_for(&id) {
+        cmd.env(k, v);
+    }
+
+    let mut child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| format!("Shell spawn failed: {}", e))?;
+
+    let pid = child.process_id().unwrap_or(0);
+    let writer = pair.master.take_writer().map_err(|e| format!("writer failed: {}", e))?;
+    let reader = pair.master.try_clone_reader().map_err(|e| format!("reader failed: {}", e))?;
+    let killer = child.clone_killer();
+
+    let shared = Arc::new(TermShared {
+        id: id.clone(),
+        workspace_id: workspace_id.to_string(),
+        pid,
+        alive: AtomicBool::new(true),
+        attached: AtomicBool::new(false),
+        ring: Mutex::new(Ring::new()),
+    });
+
+    host.terms.lock().unwrap().insert(
+        id.clone(),
+        HostTerm {
+            shared: shared.clone(),
+            master: pair.master,
+            writer: Mutex::new(writer),
+            killer: Mutex::new(killer),
+        },
+    );
+
+    /* reader: ring every byte, forward decoded chunks to the client when the
+       pane is attached. Decoding runs even while detached so a multi-byte
+       character split across chunks still lines up after an attach. */
+    let host_r = host.clone();
+    let shared_r = shared.clone();
+    std::thread::spawn(move || {
+        let mut reader = reader;
+        let mut buf = [0u8; 8192];
+        let mut carry = Vec::new();
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break, /* EOF: master closed */
+                Ok(n) => {
+                    shared_r.ring.lock().unwrap().push(&buf[..n]);
+                    let chunk = decode_pty_bytes(&mut carry, &buf[..n]);
+                    if shared_r.attached.load(Ordering::SeqCst) {
+                        if let Some(chunk) = chunk {
+                            send_data(&host_r, &shared_r.id, chunk.as_bytes());
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    /* waiter: reap the child and report the real exit code. The term stays in
+       the map so the pane keeps showing its dead screen until the app closes
+       it, exactly like the pre-daemon behaviour. */
+    let host_w = host.clone();
+    let shared_w = shared.clone();
+    std::thread::spawn(move || {
+        let code = child.wait().ok().map(|s| s.exit_code() as i32).unwrap_or(0);
+        shared_w.alive.store(false, Ordering::SeqCst);
+        send_json(&host_w, json!({ "t": "exit", "id": shared_w.id, "code": code }));
+    });
+
+    Ok((id, pid))
+}
+
+/* ---------------- server ---------------- */
+
+fn idle_watch(host: Arc<Host>) {
+    let mut idle = 0u32;
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let live = host.terms.lock().unwrap().values().any(|t| t.shared.alive.load(Ordering::SeqCst));
+        let connected = host.client_connected();
+        if live || connected {
+            idle = 0;
+            continue;
+        }
+        idle += 1;
+        /* nothing to preserve and nobody listening: do not linger as a stray
+           daemon on the user's machine */
+        if idle >= IDLE_TICKS {
+            std::process::exit(0);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn serve_loop(addr: &str, host: Arc<Host>) -> i32 {
+    use std::os::unix::fs::PermissionsExt;
+    let listener = match std::os::unix::net::UnixListener::bind(addr) {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("[bentomux] pty host bind failed on {addr}: {error}");
+            return 1;
+        }
+    };
+    /* the socket types into the user's shells: keep it owner-only */
+    let _ = std::fs::set_permissions(addr, std::fs::Permissions::from_mode(0o600));
+    for stream in listener.incoming() {
+        let Ok(stream) = stream else { continue };
+        let host = host.clone();
+        std::thread::spawn(move || serve_client(stream, &host));
+    }
+    0
+}
+
+#[cfg(unix)]
+fn serve_client(stream: std::os::unix::net::UnixStream, host: &Arc<Host>) {
+    let Ok(write_half) = stream.try_clone() else { return };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let generation = host.set_client(tx);
+    let writer = std::thread::spawn(move || {
+        let mut out = write_half;
+        while let Some(line) = rx.blocking_recv() {
+            if out.write_all(line.as_bytes()).is_err() {
+                break;
+            }
+            let _ = out.flush();
+        }
+        let _ = out.shutdown(std::net::Shutdown::Both);
+    });
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        handle_line(host, line.trim());
+    }
+    /* dropping the sender ends the writer thread's loop */
+    host.clear_client(generation);
+    let _ = writer.join();
+}
+
+#[cfg(windows)]
+fn serve_loop(addr: &str, host: Arc<Host>) -> i32 {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("[bentomux] pty host runtime failed: {error}");
+            return 1;
+        }
+    };
+    runtime.block_on(async move {
+        loop {
+            /* one instance at a time: the app is the only client, and a
+               second instance would just race it for the pipe */
+            let server = match tokio::net::windows::named_pipe::ServerOptions::new().create(addr) {
+                Ok(server) => server,
+                Err(error) => {
+                    eprintln!("[bentomux] pty host pipe bind failed on {addr}: {error}");
+                    return 1;
+                }
+            };
+            if let Err(error) = server.connect().await {
+                eprintln!("[bentomux] pty host pipe accept error: {error}");
+                continue;
+            }
+            let (read_half, mut write_half) = tokio::io::split(server);
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let generation = host.set_client(tx);
+            let writer = tokio::spawn(async move {
+                while let Some(line) = rx.recv().await {
+                    if write_half.write_all(line.as_bytes()).await.is_err() {
+                        break;
+                    }
+                    let _ = write_half.flush().await;
+                }
+                let _ = write_half.shutdown().await;
+            });
+
+            let mut reader = tokio::io::BufReader::new(read_half);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                handle_line(&host, line.trim());
+            }
+            host.clear_client(generation);
+            writer.abort();
+        }
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn serve_loop(addr: &str, _host: Arc<Host>) -> i32 {
+    eprintln!("[bentomux] pty host unsupported on this platform: {addr}");
+    1
+}
+
+/* run the server loop on `addr`. `idle_exit` is off for in-process test
+   servers, which must not take the test harness down with them. */
+pub fn serve_at(addr: &str, idle_exit: bool) -> i32 {
+    let host = Arc::new(Host::new());
+    if idle_exit {
+        let watcher = host.clone();
+        std::thread::spawn(move || idle_watch(watcher));
+    }
+    serve_loop(addr, host)
+}
+
+/* entry point for `bentomux --pty-host` */
+pub fn run_host() -> i32 {
+    let addr = host_address();
+    #[cfg(unix)]
+    {
+        use std::path::Path;
+        if Path::new(&addr).exists() {
+            if connect_at(&addr).is_ok() {
+                /* already serving: this instance is redundant */
+                return 0;
+            }
+            /* a crashed host leaves the socket file behind and bind would
+               fail on it. (ponytail: two daemons racing this unlink can leave
+               one serving an unlinked inode; the app only spawns after a
+               failed connect, so the race needs two launches in the same
+               millisecond.) */
+            let _ = std::fs::remove_file(&addr);
+        }
+    }
+    serve_at(&addr, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ring_keeps_only_the_tail() {
+        let mut ring = Ring::new();
+        ring.push(&vec![b'a'; RING_MAX]);
+        ring.push(b"tail");
+        assert_eq!(ring.buf.len(), RING_MAX);
+        assert!(ring.truncated);
+        assert!(ring.replay().ends_with(b"tail"));
+    }
+
+    #[test]
+    fn replay_skips_a_partial_front_line() {
+        let mut ring = Ring::new();
+        /* a chunk large enough to truncate, then a full frame after it */
+        ring.push(&vec![b'x'; RING_MAX]);
+        ring.push(b"\n\x1b[2JFRAME");
+        let replay = ring.replay();
+        assert!(replay.starts_with(b"\x1b[2JFRAME"), "replay: {:?}", String::from_utf8_lossy(&replay));
+    }
+
+    #[test]
+    fn untruncated_replay_is_byte_exact() {
+        let mut ring = Ring::new();
+        ring.push(b"\x1b]0;title\x07hello\n");
+        assert_eq!(ring.replay(), b"\x1b]0;title\x07hello\n");
+    }
+
+    #[test]
+    fn address_is_per_instance() {        std::env::remove_var("BENTOMUX_SMOKE");
+        std::env::remove_var("BENTOMUX_USER_DATA_SUFFIX");
+        let addr = host_address();
+        assert!(addr.contains("bentomux-pty"), "addr: {}", addr);
+    }
+
+    #[test]
+    fn base64_roundtrip() {
+        let raw = b"\x1b[31mred\x1b[0m \xe2\x94\x80";
+        assert_eq!(unb64(&b64(raw)).as_deref(), Some(raw.as_slice()));
+        assert_eq!(unb64("not base64!!"), None);
+    }
+}

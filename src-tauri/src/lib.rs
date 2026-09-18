@@ -7,6 +7,7 @@ pub mod state;
 pub mod split_tree;
 pub mod shell;
 pub mod pty;
+pub mod pty_host;
 pub mod detect;
 pub mod agents;
 pub mod agent_hooks;
@@ -128,7 +129,11 @@ pub fn run() {
         .run(|_app, event| {
             /* ensure pending hook connections are closed on exit so agent
                PermissionRequests don't hang waiting for our directive
-               (port of Electron's before-quit → stopBridge in bridge.ts) */
+               (port of Electron's before-quit → stopBridge in bridge.ts).
+
+               The panes are deliberately NOT killed here: they belong to the
+               pty host daemon, so quitting leaves the agent CLIs running and
+               the next launch reattaches to them. */
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 bridge::stop_bridge();
                 crate::remote::stop_tunnel();
