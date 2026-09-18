@@ -9,6 +9,7 @@ import { render } from '../render';
 import { disposeTerminal } from './terminal';
 import { resetPaneRatio } from './terminal';
 import { openContextMenu } from '../components/menu';
+import { openModal } from '../components/modal';
 import { refreshChangesPill } from './gitPanel';
 
 const TAB_TITLE_MAX = 80;
@@ -292,7 +293,26 @@ export async function newTerminalTab(wsId?: string): Promise<void> {
     }
   } catch (e) {
     console.error('create tab failed', e);
+    reportPaneFailure(e);
   }
+}
+
+/* A pane that cannot start means the pty host daemon is unreachable — every
+   later pane fails the same way, so say it once where the user can see it
+   instead of only in a console they never open. */
+let paneFailureShown = false;
+
+function reportPaneFailure(e: unknown): void {
+  if (paneFailureShown) return;
+  paneFailureShown = true;
+  const m = openModal({
+    title: 'Cannot start terminal',
+    body: h('div', {},
+      h('p', { style: 'margin:0 0 6px' }, 'The background session daemon did not answer.'),
+      h('p', { style: 'margin:0;color:var(--ink-2)' }, String(e)),
+      h('p', { style: 'margin:6px 0 0;color:var(--ink-2)' }, 'Restart Bentomux. If it keeps happening, the log is in your temp folder as bentomux-pty.log.')),
+    footer: h('div', {}, h('button', { class: 'btn primary', onclick: () => m.close() }, 'OK')),
+  });
 }
 
 /* split the pane `paneId`: new shell to its right ('v') or below it ('h').
