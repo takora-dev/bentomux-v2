@@ -216,6 +216,27 @@ pub fn workspace_reorder(ids: Vec<String>, state: State<'_, AppStateManager>) ->
 }
 
 #[tauri::command]
+pub fn tab_reorder(ids: Vec<String>, state: State<'_, AppStateManager>) -> AppState {
+    let cur = state.get_state();
+    if ids.len() != cur.open_tabs.len() {
+        return cur;
+    }
+    let by_id: HashMap<_, _> = cur.open_tabs.iter().map(|t| (t.id.clone(), t.clone())).collect();
+    let mut seen = std::collections::HashSet::with_capacity(ids.len());
+    let mut ordered = Vec::with_capacity(ids.len());
+    for id in &ids {
+        if !seen.insert(id) {
+            return cur;
+        }
+        match by_id.get(id) {
+            Some(tab) => ordered.push(tab.clone()),
+            None => return cur,
+        }
+    }
+    state.patch_state(|s| s.open_tabs = ordered)
+}
+
+#[tauri::command]
 pub fn workspace_active(id: Option<String>, state: State<'_, AppStateManager>) -> AppState {
     if state.get_state().active_workspace_id != id {
         state.patch_state(|s| s.active_workspace_id = id);

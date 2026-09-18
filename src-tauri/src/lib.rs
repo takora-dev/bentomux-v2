@@ -83,6 +83,7 @@ pub fn run() {
             commands::workspace_remove,
             commands::workspace_reorder,
             commands::workspace_active,
+            commands::tab_reorder,
             commands::tab_restore,
             commands::tab_create,
             commands::tab_split,

@@ -113,6 +113,7 @@ const api = {
   addWorkspace: (path: string) => invoke<AppState>('workspace_add', { path }),
   removeWorkspace: (id: string) => invoke<AppState>('workspace_remove', { id }),
   reorderWorkspaces: (ids: string[]) => invoke<AppState>('workspace_reorder', { ids }),
+  reorderTabs: (ids: string[]) => invoke<AppState>('tab_reorder', { ids }),
   setActiveWorkspace: (id: string | null) => { void invoke('workspace_active', { id }); },
 
   /* terminal tabs (panes: a tab may hold up to two shells side by side) */

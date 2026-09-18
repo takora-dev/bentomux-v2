@@ -6,6 +6,7 @@
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import '@xterm/xterm/css/xterm.css';
 import { h, $ } from '../dom';
 import { openContextMenu, type MenuEntry } from '../components/menu';
@@ -124,7 +125,17 @@ function createXterm(tabId: string): { term: Terminal; fit: FitAddon; host: HTML
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
-  term.loadAddon(new WebLinksAddon());
+  term.loadAddon(new WebLinksAddon((_, uri) => {
+    try {
+      const url = new URL(uri);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+      void openUrl(url).catch(error => {
+        console.error('[terminal] failed to open link:', error);
+      });
+    } catch (error) {
+      console.error('[terminal] invalid link:', error);
+    }
+  }));
   const host = h('div', { class: 'terminal-host', 'data-tab-id': tabId });
 
   // MUST call term.open() before term.element is available

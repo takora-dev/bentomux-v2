@@ -43,11 +43,7 @@ export function tabTitle(t: TabEntry): string {
   const route = t.route;
   if (route.view === 'terminal') {
     if (t.title) return t.title;
-    const ws = db.workspaces.find(w => w.id === t.workspaceId);
-    const branch = branches.get(t.workspaceId || '');
-    return branch && ws?.name
-      ? `${ws.name} · ${branch}`
-      : branch || ws?.name || 'Terminal';
+    return branches.get(t.workspaceId || '') || 'Terminal';
   }
   if (route.view === 'agentDetail') {
     const cap = route.tab === 'model' ? 'Model' : route.tab === 'memory' ? 'Memory' : route.tab === 'skills' ? 'Skills' : 'MCP';
@@ -447,6 +443,11 @@ function reorderTab(draggedId: string, targetId: string, below: boolean): void {
   let index = 0;
   ui.tabs = ui.tabs.map(tab => tab.workspaceId === source.workspaceId
     ? tabs[index++] : tab);
+  void window.bentomux.reorderTabs(
+    ui.tabs
+      .filter(tab => tab.route.view === 'terminal')
+      .map(tab => tab.route.view === 'terminal' ? tab.route.tabId : ''),
+  );
   renderTabs();
 }
 
@@ -463,7 +464,10 @@ function tabButton(t: TabEntry): HTMLElement {
   const title = tabTitle(t);
   /* diff tabs carry the repo-relative file path in their route — surface it
      in the tooltip so same-named files from different folders are told apart */
-  const tooltip = t.route.view === 'diff' ? t.route.path : (t.title ? title + '\nDouble-click to rename' : title);
+  const tooltip = t.route.view === 'diff'
+    ? t.route.path
+    : [workspaceLabel(t.workspaceId), title, t.title ?
+      'Double-click to rename' : ''].filter(Boolean).join('\n');
   return h('button',
     {
       class: 'tab' + (t.id === ui.activeTab ? ' active' : ''),

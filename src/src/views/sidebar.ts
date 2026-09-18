@@ -7,7 +7,7 @@ import { ui, type Route, type TabEntry } from '../state';
 import { db, branches, runtime, activity, setDb } from '../store';
 import { go } from '../router';
 import { render } from '../render';
-import { activate, leavesOf, newTerminalTab } from './tabs';
+import { activate, closeTerminalPane, leavesOf, newTerminalTab } from './tabs';
 import { mostRecentPane, primePaneFocus } from './terminal';
 import { openModal } from '../components/modal';
 import { closeContextMenu, contextMenuAnchoredTo, openContextMenu, type MenuEntry } from '../components/menu';
@@ -93,6 +93,24 @@ function onRevealEnd(btn: HTMLElement): void {
 
 function paneItem(row: PaneRow, pad: number, reveal: boolean = false): HTMLElement {
   const m = paneViewModel(row);
+  const close = h('span', {
+    class: 'pane-close',
+    role: 'button',
+    tabindex: '0',
+    title: 'Close terminal',
+    'aria-label': 'Close terminal',
+  }, '×');
+  close.addEventListener('click', e => {
+    e.stopPropagation();
+    void closeTerminalPane(m.paneId);
+  });
+  close.addEventListener('pointerdown', e => e.stopPropagation());
+  close.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    e.stopPropagation();
+    void closeTerminalPane(m.paneId);
+  });
   const btn = h('button', {
     class: 'nav-item sub workspace-child' + (m.isActive ? ' active' : '') + (reveal ? ' reveal' : ''),
     style: 'padding-left:' + pad + 'px',
@@ -108,7 +126,8 @@ function paneItem(row: PaneRow, pad: number, reveal: boolean = false): HTMLEleme
         h('span', { class: 'workspace-agent' },
           h('span', { class: 'agent-status ' + m.status }, m.status),
           h('span', { class: 'agent-sep' }, '·'),
-          h('span', {}, m.agent || 'shell')))));
+          h('span', {}, m.agent || 'shell'))),
+      close));
   btn.addEventListener('pointerdown', e => startPaneDrag(e, btn, m.paneId));
   btn.addEventListener('pointermove', movePaneDrag);
   btn.addEventListener('pointerup', endPaneDrag);
@@ -156,6 +175,11 @@ function finishPaneDrag(): void {
   if (sourceId && targetId && sourceId !== targetId) {
     const moved = ui.tabs.find(t => t.route.view === 'terminal' && leavesOf(t).includes(sourceId));
     if (reorderPane(sourceId, targetId, below) && moved) {
+      void window.bentomux.reorderTabs(
+        ui.tabs
+          .filter(tab => tab.route.view === 'terminal')
+          .map(tab => tab.route.view === 'terminal' ? tab.route.tabId : ''),
+      );
       activatePane(sourceId, moved.id);
     }
   }

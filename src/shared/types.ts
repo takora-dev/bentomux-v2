@@ -379,6 +379,8 @@ export interface BentomuxApi {
   removeWorkspace(id: string): Promise<AppState>;
   /** persist a new sidebar order; `ids` must be a permutation of the current workspace ids */
   reorderWorkspaces(ids: string[]): Promise<AppState>;
+  /** persist terminal tab order; `ids` must be a permutation of current tabs */
+  reorderTabs(ids: string[]): Promise<AppState>;
   setActiveWorkspace(id: string | null): void;
 
   /* terminal tabs (panes: recursive splits, side by side or stacked) */
