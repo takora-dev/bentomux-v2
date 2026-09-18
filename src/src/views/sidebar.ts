@@ -25,6 +25,13 @@ let dragTargetId: string | null = null;
 let dragBelow = false;
 let dragMoved = false;
 let suppressFolderClick = false;
+let paneDragId: string | null = null;
+let paneDragPointerId: number | null = null;
+let paneDragTargetId: string | null = null;
+let paneDragMoved = false;
+let paneDragBelow = false;
+let paneDragStartX = 0;
+let paneDragStartY = 0;
 
 interface PaneRow {
   entry: TabEntry;
@@ -102,6 +109,10 @@ function paneItem(row: PaneRow, pad: number, reveal: boolean = false): HTMLEleme
           h('span', { class: 'agent-status ' + m.status }, m.status),
           h('span', { class: 'agent-sep' }, '·'),
           h('span', {}, m.agent || 'shell')))));
+  btn.addEventListener('pointerdown', e => startPaneDrag(e, btn, m.paneId));
+  btn.addEventListener('pointermove', movePaneDrag);
+  btn.addEventListener('pointerup', endPaneDrag);
+  btn.addEventListener('pointercancel', finishPaneDrag);
   if (reveal) onRevealEnd(btn);
   return btn;
 }
@@ -109,6 +120,88 @@ function paneItem(row: PaneRow, pad: number, reveal: boolean = false): HTMLEleme
 function activatePane(paneId: string, entryId: string): void {
   primePaneFocus(paneId);
   activate(entryId);
+}
+
+function clearPaneDropMarks(): void {
+  for (const el of $$('.workspace-child.drop-above, .workspace-child.drop-below')) {
+    el.classList.remove('drop-above', 'drop-below');
+  }
+}
+
+function updatePaneDrag(x: number, y: number): void {
+  if (!paneDragId) return;
+  const target = document.elementFromPoint(x, y)?.closest<HTMLElement>('.workspace-child');
+  if (!target || target.dataset.pane === paneDragId) {
+    paneDragTargetId = null;
+    clearPaneDropMarks();
+    return;
+  }
+  clearPaneDropMarks();
+  const bounds = target.getBoundingClientRect();
+  paneDragBelow = y > bounds.top + bounds.height / 2;
+  target.classList.add(paneDragBelow ? 'drop-below' : 'drop-above');
+  paneDragTargetId = target.dataset.pane || null;
+}
+
+function finishPaneDrag(): void {
+  const sourceId = paneDragId;
+  const targetId = paneDragTargetId;
+  const below = paneDragBelow;
+  paneDragId = null;
+  paneDragPointerId = null;
+  paneDragTargetId = null;
+  paneDragBelow = false;
+  clearPaneDropMarks();
+  document.body.classList.remove('pane-dragging');
+  if (sourceId && targetId && sourceId !== targetId) {
+    const moved = ui.tabs.find(t => t.route.view === 'terminal' && leavesOf(t).includes(sourceId));
+    if (reorderPane(sourceId, targetId, below) && moved) {
+      activatePane(sourceId, moved.id);
+    }
+  }
+}
+
+function reorderPane(sourceId: string, targetId: string, below: boolean): boolean {
+  const source = ui.tabs.find(t => t.route.view === 'terminal' && leavesOf(t).includes(sourceId));
+  const target = ui.tabs.find(t => t.route.view === 'terminal' && leavesOf(t).includes(targetId));
+  if (!source || !target || source === target || source.workspaceId !== target.workspaceId) return false;
+  const tabs = ui.tabs.filter(t => t.route.view === 'terminal' && t.workspaceId === source.workspaceId);
+  const from = tabs.indexOf(source);
+  const to = tabs.indexOf(target);
+  if (from < 0 || to < 0) return false;
+  const [moved] = tabs.splice(from, 1);
+  const targetPosition = tabs.indexOf(target);
+  tabs.splice(below ? targetPosition + 1 : targetPosition, 0, moved);
+  let index = 0;
+  ui.tabs = ui.tabs.map(tab => {
+    if (tab.route.view !== 'terminal' || tab.workspaceId !== source.workspaceId) return tab;
+    return tabs[index++];
+  });
+  return true;
+}
+
+function startPaneDrag(e: PointerEvent, row: HTMLElement, paneId: string): void {
+  if (e.button !== 0) return;
+  paneDragId = paneId;
+  paneDragPointerId = e.pointerId;
+  paneDragMoved = false;
+  paneDragStartX = e.clientX;
+  paneDragStartY = e.clientY;
+  row.setPointerCapture(e.pointerId);
+}
+
+function movePaneDrag(e: PointerEvent): void {
+  if (paneDragPointerId !== e.pointerId || !paneDragId) return;
+  if (Math.hypot(e.clientX - paneDragStartX, e.clientY - paneDragStartY) < 5) return;
+  paneDragMoved = true;
+  document.body.classList.add('pane-dragging');
+  updatePaneDrag(e.clientX, e.clientY);
+}
+
+function endPaneDrag(e: PointerEvent): void {
+  if (paneDragPointerId !== e.pointerId) return;
+  if (paneDragMoved) e.preventDefault();
+  finishPaneDrag();
 }
 
 export function addWorkspaceFlow(): void {

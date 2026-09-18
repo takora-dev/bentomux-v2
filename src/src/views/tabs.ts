@@ -386,6 +386,78 @@ function jumpToHistoryEntry(id: string): void {
 }
 
 let wheelWired = false;
+let draggedTabId: string | null = null;
+let dragTargetTabId: string | null = null;
+let dragBelow = false;
+let dragMoved = false;
+
+function clearTabDropMarks(): void {
+  for (const el of document.querySelectorAll('.tab.drop-above, .tab.drop-below')) {
+    el.classList.remove('drop-above', 'drop-below');
+  }
+}
+
+function updateTabDrag(x: number, y: number): void {
+  if (!draggedTabId) return;
+  const target = document.elementFromPoint(x, y)?.closest<HTMLElement>('.tab');
+  if (!target || target.dataset.tab === draggedTabId) {
+    dragTargetTabId = null;
+    clearTabDropMarks();
+    return;
+  }
+  const source = tabFor(draggedTabId);
+  const targetEntry = tabFor(target.dataset.tab || null);
+  if (!source || !targetEntry || source.workspaceId !== targetEntry.workspaceId) {
+    dragTargetTabId = null;
+    clearTabDropMarks();
+    return;
+  }
+  const bounds = target.getBoundingClientRect();
+  dragBelow = x > bounds.left + bounds.width / 2;
+  dragTargetTabId = target.dataset.tab || null;
+  clearTabDropMarks();
+  target.classList.add(dragBelow ? 'drop-below' : 'drop-above');
+}
+
+function finishTabDrag(): void {
+  const sourceId = draggedTabId;
+  const targetId = dragTargetTabId;
+  const below = dragBelow;
+  draggedTabId = null;
+  dragTargetTabId = null;
+  dragBelow = false;
+  clearTabDropMarks();
+  document.body.classList.remove('tab-dragging');
+  if (!sourceId || !targetId || sourceId === targetId) return;
+  reorderTab(sourceId, targetId, below);
+  activate(sourceId);
+}
+
+function reorderTab(draggedId: string, targetId: string, below: boolean): void {
+  const source = tabFor(draggedId);
+  const target = tabFor(targetId);
+  if (!source || !target || source.workspaceId !== target.workspaceId) return;
+  const tabs = ui.tabs.filter(t => t.workspaceId === source.workspaceId);
+  const from = tabs.indexOf(source);
+  const targetIndex = tabs.indexOf(target);
+  if (from < 0 || targetIndex < 0) return;
+  const [moved] = tabs.splice(from, 1);
+  const insertAt = tabs.indexOf(target);
+  tabs.splice(below ? insertAt + 1 : insertAt, 0, moved);
+  let index = 0;
+  ui.tabs = ui.tabs.map(tab => tab.workspaceId === source.workspaceId
+    ? tabs[index++] : tab);
+  renderTabs();
+}
+
+function workspaceLabel(workspaceId: string | undefined): string {
+  if (!workspaceId) return 'Other';
+  return db.workspaces.find(w => w.id === workspaceId)?.name || 'Workspace';
+}
+
+function tabWorkspaceKey(t: TabEntry): string {
+  return t.workspaceId || 'other';
+}
 
 function tabButton(t: TabEntry): HTMLElement {
   const title = tabTitle(t);
@@ -399,7 +471,30 @@ function tabButton(t: TabEntry): HTMLElement {
       dataset: { tab: t.id },
       /* no-op on an already-active tab: render() rebuilds the strip,
          which would eat the second click's dblclick for rename */
-      onclick: () => { if (ui.activeTab !== t.id) activate(t.id); },
+      onclick: (e: MouseEvent) => {
+        if (ui.activeTab !== t.id) activate(t.id);
+      },
+      onpointerdown: (e: PointerEvent) => {
+        if (e.button !== 0) return;
+        draggedTabId = t.id;
+        dragTargetTabId = null;
+        dragMoved = false;
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      },
+      onpointermove: (e: PointerEvent) => {
+        if (draggedTabId !== t.id) return;
+        if (Math.abs(e.movementX) + Math.abs(e.movementY) <= 3) return;
+        dragMoved = true;
+        document.body.classList.add('tab-dragging');
+        updateTabDrag(e.clientX, e.clientY);
+      },
+      onpointerup: (e: PointerEvent) => {
+        if (draggedTabId !== t.id) return;
+        if (dragMoved) e.preventDefault();
+        updateTabDrag(e.clientX, e.clientY);
+        finishTabDrag();
+      },
+      onpointercancel: finishTabDrag,
       ondblclick: () => beginRename(t.id),
       oncontextmenu: (e: MouseEvent) => {
         e.preventDefault();
@@ -408,7 +503,11 @@ function tabButton(t: TabEntry): HTMLElement {
       },
     },
     h('span', { class: 'tabname' }, title),
-    h('span', { class: 'tabx', onclick: (e: Event) => { e.stopPropagation(); void closeTab(t.id); } }, '×'),
+    h('span', {
+      class: 'tabx',
+      onpointerdown: (e: Event) => e.stopPropagation(),
+      onclick: (e: Event) => { e.stopPropagation(); void closeTab(t.id); },
+    }, '×'),
   );
 }
 
@@ -424,6 +523,12 @@ function addTabButton(): HTMLElement {
 function wireWheelOnce(strip: HTMLElement): void {
   if (wheelWired) return;
   wheelWired = true;
+  strip.addEventListener('pointermove', (e: PointerEvent) => {
+    if (draggedTabId) updateTabDrag(e.clientX, e.clientY);
+  });
+  strip.addEventListener('pointerup', (e: PointerEvent) => {
+    if (draggedTabId) finishTabDrag();
+  });
   strip.addEventListener('wheel', (e: WheelEvent) => {
     if (strip.scrollWidth > strip.clientWidth) {
       strip.scrollLeft += e.deltaY;
@@ -442,9 +547,25 @@ export function renderTabs(): void {
   strip.classList.add('tabstrip');
   $('#titlebar').classList.add('has-tabs');
   strip.innerHTML = '';
-  /* the strip holds terminal tabs plus per-file diff tabs; the '+' button
-     only makes sense for terminals */
-  for (const t of ui.tabs.filter(t => t.route.view === 'terminal' || t.route.view === 'diff')) strip.append(tabButton(t));
+  const visibleTabs = ui.tabs.filter(t => t.route.view === 'terminal' || t.route.view === 'diff');
+  const groups = new Map<string, TabEntry[]>();
+  for (const tab of visibleTabs) {
+    const key = tabWorkspaceKey(tab);
+    const group = groups.get(key) || [];
+    group.push(tab);
+    groups.set(key, group);
+  }
+  for (const [workspaceId, tabs] of groups) {
+    const name = workspaceLabel(workspaceId === 'other' ? undefined : workspaceId);
+    const group = h('div', {
+      class: 'tabgroup',
+      title: name,
+      dataset: { workspace: workspaceId },
+    });
+    group.append(h('span', { class: 'tabgroup-name' }, name));
+    group.append(...tabs.map(tabButton));
+    strip.append(group);
+  }
   if (ui.tabs.some(t => t.route.view === 'terminal')) strip.append(addTabButton());
 
   /* overflow strip scrolls horizontally instead of clipping tabs */
