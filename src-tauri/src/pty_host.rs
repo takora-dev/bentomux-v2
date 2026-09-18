@@ -245,11 +245,20 @@ impl Ring {
         let mut out: Vec<u8> = self.buf.iter().copied().collect();
         if self.truncated {
             /* a full ring starts mid-stream, possibly inside an escape
-               sequence; resuming at the next line start keeps the parser sane
-               (a partial CSI would otherwise swallow the text after it) */
-            if let Some(nl) = out.iter().position(|&b| b == b'\n') {
-                out.drain(..=nl);
-            }
+               sequence. Replay only the newest complete line: scanning from
+               the first newline can still expose the tail of a later OSC/CSI
+               sequence as printable text (for example the shell color table). */
+            let Some(last_nl) = out.iter().rposition(|&b| b == b'\n') else {
+                out.clear();
+                return out;
+            };
+            let end = last_nl + 1;
+            let start = out[..last_nl]
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            out = out[start..end].to_vec();
         }
         out
     }
@@ -683,20 +692,29 @@ mod tests {
     fn ring_keeps_only_the_tail() {
         let mut ring = Ring::new();
         ring.push(&vec![b'a'; RING_MAX]);
-        ring.push(b"tail");
+        ring.push(b"\nhead\ntail\n");
         assert_eq!(ring.buf.len(), RING_MAX);
         assert!(ring.truncated);
-        assert!(ring.replay().ends_with(b"tail"));
+        assert!(ring.replay().ends_with(b"tail\n"));
     }
 
     #[test]
-    fn replay_skips_a_partial_front_line() {
+    fn replay_skips_partial_front_lines() {
         let mut ring = Ring::new();
-        /* a chunk large enough to truncate, then a full frame after it */
+        /* a chunk large enough to truncate, then a partial escape sequence and
+           a newer complete line */
         ring.push(&vec![b'x'; RING_MAX]);
-        ring.push(b"\n\x1b[2JFRAME");
+        ring.push(b"\npartial-osc-payload\n\x1b[2JFRAME\n");
         let replay = ring.replay();
         assert!(replay.starts_with(b"\x1b[2JFRAME"), "replay: {:?}", String::from_utf8_lossy(&replay));
+    }
+
+    #[test]
+    fn truncated_replay_drops_incomplete_front_line() {
+        let mut ring = Ring::new();
+        ring.push(&vec![b'x'; RING_MAX]);
+        ring.push(b"partial-escape");
+        assert!(ring.replay().is_empty());
     }
 
     #[test]
