@@ -1,6 +1,6 @@
 /* ---------------- settings modal (left menu + section content) ----------------
    Opens as a modal with an internal menu; sections plug into SECTIONS below.
-   Ships Appearance, Terminal (shell), Keybindings, and Notifications. */
+   Ships Appearance, Keybindings, Notifications, and Updates. */
 
 import { h } from '../dom';
 import { currentModal, field, openModal } from '../components/modal';
@@ -145,33 +145,6 @@ function buildAppearanceSection(paint: () => void): HTMLElement {
     field('Palette', buildPaletteGrid(paint)),
     field('Terminal font', buildFontSelect()),
     field('Font size', buildFontSizeSelect()));
-}
-
-/* ---------------- Terminal ---------------- */
-
-type ShellValue = NonNullable<Prefs['shell']>;
-
-const SHELLS: Array<[ShellValue, string]> = [
-  ['system', 'System default ($SHELL)'],
-  ['zsh', 'zsh'],
-  ['bash', 'bash'],
-  ['fish', 'fish'],
-  ['powershell', 'PowerShell'],
-  ['cmd', 'Command Prompt'],
-  ['gitbash', 'Git Bash'],
-  ['wsl', 'WSL'],
-];
-
-function buildShellSelect(): HTMLElement {
-  const sel = selectEl(SHELLS, db.prefs.shell || 'system');
-  sel.addEventListener('change', () => setPref('shell', sel.value as ShellValue));
-  return sel;
-}
-
-function buildTerminalSection(paint: () => void): HTMLElement {
-  return h('div', { class: 'settings-section' },
-    field('Shell', buildShellSelect()),
-    hint('Used by new terminals; open panes keep their shell until closed.'));
 }
 
 /* ---------------- Keybindings ---------------- */
@@ -384,7 +357,6 @@ interface SettingsSection {
 
 const SECTIONS: SettingsSection[] = [
   { id: 'appearance', label: 'Appearance', icon: 'lines', build: buildAppearanceSection },
-  { id: 'terminal', label: 'Terminal', icon: 'term', build: buildTerminalSection },
   { id: 'keys', label: 'Keybindings', icon: 'key', build: buildKeysSection },
   { id: 'notifications', label: 'Notifications', icon: 'bell', build: buildNotificationsSection },
   { id: 'updates', label: 'Updates', icon: 'gear', build: buildUpdatesSection },
