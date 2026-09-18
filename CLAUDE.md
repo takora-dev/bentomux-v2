@@ -74,6 +74,7 @@ Plain TS modules in `src/src/` — no bundled framework. Two windows share the s
 | `state.rs` | Persisted app state at `app_data_dir/bentomux.json` — Rust port of `src/main/store.ts`. All structs use `#[serde(rename_all="camelCase")]` for exact JSON compat with Electron's `bentomux.json` |
 | `commands.rs` | Tauri `#[tauri::command]` handlers — sole renderer-to-backend API |
 | `pty.rs` | PTY management via `portable-pty` |
+| `pty_host.rs` | Persistent PTY daemon (`bentomux --pty-host`): owns every pty master so panes outlive the app process, plus the reconnect protocol the app client speaks |
 | `shell.rs` | Shell spawning helpers |
 | `split_tree.rs` | Pane layout tree (ported from `src/shared/split-tree.ts`) |
 | `detect/` | Agent state detection: `manifests.rs`, `rules.rs`, `screen.rs` (screen buffer parsing, YAML/TOML agent configs) |
@@ -89,6 +90,12 @@ Identifier: `app.bentomux.desktop`. Capabilities: `core:default`, `core:window:d
 
 ### Conventions
 
+- Terminal panes are owned by the pty host daemon (`src-tauri/src/pty_host.rs`),
+  not the app process — quitting leaves agents running on purpose. Never kill
+  panes on `ExitRequested`; `app_quit(stopPanes=true)` is the explicit escape
+  hatch. The daemon protocol is versioned (`pty_host::PROTOCOL_VERSION`): bump
+  it whenever a message shape changes, and the app will replace a stale daemon
+  on the next launch.
 - Persisted JSON on disk must stay `camelCase` — serde renames are load-bearing for existing `bentomux.json` files.
 - Work only in `Bentomux-v2/`; do not modify `../Bentomux/` (original Electron source).
 - Renderer is kept unchanged during backend phases; migration proceeds phase-by-phase per `MIGRATION_TO_TAURI.md`.
