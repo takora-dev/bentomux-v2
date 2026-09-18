@@ -26,6 +26,24 @@ interface Live {
 const lives = new Map<string, Live>();
 const pending = new Map<string, string>();
 const lastFocus = new Map<string, number>();
+
+/* Output for a pane that is not mounted yet (its workspace is not the active
+   one) is buffered until it mounts. Without a cap a busy agent in a
+   background workspace grows that string forever; keep the tail, which is
+   what the screen shows. */
+const PENDING_MAX = 256 * 1024;
+
+function bufferPending(id: string, chunk: string): void {
+  let buf = (pending.get(id) || '') + chunk;
+  if (buf.length > PENDING_MAX) {
+    buf = buf.slice(buf.length - PENDING_MAX);
+    /* resume at a line start: a cut escape sequence would swallow the text
+       that follows it */
+    const nl = buf.indexOf('\n');
+    if (nl !== -1) buf = buf.slice(nl + 1);
+  }
+  pending.set(id, buf);
+}
 /* per-axis divider position within a session ('%' of the axis) */
 const ratioByNode = new Map<string, number>();
 let parking: HTMLElement;
@@ -98,7 +116,7 @@ export function initTerminalEvents(): void {
     ) {
       live.term.write(chunk);
     } else {
-      pending.set(id, (pending.get(id) || '') + chunk);
+      bufferPending(id, chunk);
     }
   });
   window.bentomux.onPtyExit((id, _code) => {
