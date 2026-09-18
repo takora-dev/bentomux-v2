@@ -44,7 +44,10 @@ export function tabTitle(t: TabEntry): string {
   if (route.view === 'terminal') {
     if (t.title) return t.title;
     const ws = db.workspaces.find(w => w.id === t.workspaceId);
-    return branches.get(t.workspaceId || '') || ws?.name || 'Terminal';
+    const branch = branches.get(t.workspaceId || '');
+    return branch && ws?.name
+      ? `${ws.name} · ${branch}`
+      : branch || ws?.name || 'Terminal';
   }
   if (route.view === 'agentDetail') {
     const cap = route.tab === 'model' ? 'Model' : route.tab === 'memory' ? 'Memory' : route.tab === 'skills' ? 'Skills' : 'MCP';
