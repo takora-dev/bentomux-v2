@@ -346,6 +346,48 @@ function buildUpdatesSection(paint: () => void): HTMLElement {
     h('div', { class: 'hooks-row', style: 'margin-top:8px;gap:8px' }, actionBtn, fallback));
 }
 
+/* ---------------- Sessions (the pty host daemon) ---------------- */
+
+/* Panes live in a daemon that outlives the app, which is the point — but it
+   also means Cmd+Q no longer stops anything. This is the one place that does.
+   The confirm is inline rather than a nested modal: only one modal can be open
+   at a time, and this section already lives inside one. */
+function buildSessionsSection(_paint: () => void): HTMLElement {
+  const row = h('div', { class: 'hooks-row' });
+  let armed = false;
+
+  const draw = (): void => {
+    row.innerHTML = '';
+    if (!armed) {
+      row.append(h('button', {
+        class: 'btn',
+        type: 'button',
+        onclick: () => { armed = true; draw(); },
+      }, 'Quit and stop all panes'));
+      return;
+    }
+    row.append(
+      h('span', { class: 'settings-hint' }, 'Stop every running pane and quit?'),
+      h('button', {
+        class: 'btn ghost',
+        type: 'button',
+        onclick: () => { armed = false; draw(); },
+      }, 'Cancel'),
+      h('button', {
+        class: 'btn primary',
+        type: 'button',
+        onclick: () => { void window.bentomux.quitApp(true); },
+      }, 'Stop and quit'),
+    );
+  };
+  draw();
+
+  return h('div', { class: 'settings-section' },
+    hint('Panes run in a background daemon, so quitting or closing Bentomux leaves your agents working. Reopen Bentomux and they are still there.'),
+    field('Stop everything', row),
+    hint('Stops every pane and the daemon, then quits. Nothing is left running.'));
+}
+
 /* ---------------- modal shell ---------------- */
 
 interface SettingsSection {
@@ -359,6 +401,7 @@ const SECTIONS: SettingsSection[] = [
   { id: 'appearance', label: 'Appearance', icon: 'lines', build: buildAppearanceSection },
   { id: 'keys', label: 'Keybindings', icon: 'key', build: buildKeysSection },
   { id: 'notifications', label: 'Notifications', icon: 'bell', build: buildNotificationsSection },
+  { id: 'sessions', label: 'Sessions', icon: 'term', build: buildSessionsSection },
   { id: 'updates', label: 'Updates', icon: 'gear', build: buildUpdatesSection },
 ];
 

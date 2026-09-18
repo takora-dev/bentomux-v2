@@ -121,6 +121,7 @@ pub fn run() {
             commands::win_toggle_maximize,
             commands::win_toggle_fullscreen,
             commands::win_close,
+            commands::app_quit,
             commands::shutdown_for_update,
             commands::temp_write_file,
         ])

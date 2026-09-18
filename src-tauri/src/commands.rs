@@ -747,6 +747,17 @@ pub fn win_close(window: tauri::Window) {
     let _ = window.close();
 }
 
+/* Quit for real. The default quit deliberately leaves the pty host daemon and
+   its panes running, so this is the escape hatch for "I want nothing left
+   behind": stop every pane, stop the daemon, then exit the app. */
+#[tauri::command]
+pub fn app_quit(stop_panes: bool, pty: State<'_, PtyManager>, app: tauri::AppHandle) {
+    if stop_panes {
+        pty.shutdown_host();
+    }
+    app.exit(0);
+}
+
 /* Kill cloudflared and the remote HTTP server before the NSIS/MSI installer
    overwrites cloudflared.exe, and stop the pty host: on Windows the installer
    cannot replace a running exe, and the host is that exe. Called by the

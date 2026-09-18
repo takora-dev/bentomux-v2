@@ -395,6 +395,8 @@ export interface BentomuxApi {
   resizeTab(id: string, cols: number, rows: number): void;
   onPtyData(cb: (id: string, chunk: string) => void): () => void;
   onPtyExit(cb: (id: string, code: number) => void): () => void;
+  /* stopPanes=false keeps the background daemon (and its agents) alive */
+  quitApp(stopPanes: boolean): Promise<void>;
 
   /* git */
   branchFor(path: string): Promise<string | null>;

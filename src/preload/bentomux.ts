@@ -133,6 +133,10 @@ const api = {
   onPtyExit: (cb: (id: string, code: number) => void) =>
     subscribe<[string, number]>('pty:exit', p => cb(p[0], p[1])),
 
+  /* quitting: stopPanes=false leaves the background daemon and its agents
+     running (the default), true stops every pane first */
+  quitApp: (stopPanes: boolean) => invoke<void>('app_quit', { stopPanes }),
+
   /* git */
   branchFor: (path: string) => invoke<string | null>('git_branch_for', { path }),
   onBranch: (cb: (workspaceId: string, branch: string | null) => void) =>
