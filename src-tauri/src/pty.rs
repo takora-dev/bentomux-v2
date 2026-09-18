@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use tauri::Emitter;
@@ -69,8 +69,6 @@ pub struct PtyManager {
     out: Arc<Mutex<Option<mpsc::Sender<String>>>>,
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>>,
     seq: AtomicU64,
-    /* flips false when the daemon is gone or asked to stop */
-    connected: AtomicBool,
 }
 
 pub fn decode_pty_bytes(carry: &mut Vec<u8>, bytes: &[u8]) -> Option<String> {
@@ -113,7 +111,6 @@ impl PtyManager {
             out: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(HashMap::new())),
             seq: AtomicU64::new(1),
-            connected: AtomicBool::new(false),
         };
         manager.connect_with_handshake();
         manager
@@ -159,18 +156,13 @@ impl PtyManager {
         }
     }
 
-    /* stop the daemon and wait for its listener to go away, so the next
+    /* stop the daemon and wait for it to stop answering, so the next
        connect_host() starts a fresh one instead of racing the dying process */
     fn restart_host(&self) {
         self.shutdown_host();
-        let addr = crate::pty_host::host_address();
-        for _ in 0..80 {
-            if crate::pty_host::connect_at(&addr).is_err() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(50));
+        if !crate::pty_host::wait_host_gone(Duration::from_secs(4)) {
+            eprintln!("[bentomux] pty host still listening after shutdown");
         }
-        eprintln!("[bentomux] pty host still listening after shutdown");
     }
 
     /* subscribe to raw pty output (id, chunk) */
@@ -183,33 +175,31 @@ impl PtyManager {
         self.exit_tx.subscribe()
     }
 
-    pub fn is_connected(&self) -> bool {
-        self.connected.load(Ordering::SeqCst)
-    }
-
     fn attach_transport(&mut self, stream: HostStream) {
         let HostStream { reader, mut writer } = stream;
         let (out_tx, out_rx) = mpsc::channel::<String>();
 
+        /* A write failure used to be swallowed here, and every later request
+           then sat out the full timeout with nothing in the log. Drop the
+           sender instead, so send() fails immediately and says why. */
+        let out_slot = self.out.clone();
         std::thread::spawn(move || {
             while let Ok(line) = out_rx.recv() {
-                if writer.write_all(line.as_bytes()).is_err() {
-                    break;
-                }
-                if writer.flush().is_err() {
+                if writer.write_all(line.as_bytes()).is_err() || writer.flush().is_err() {
+                    *out_slot.lock().unwrap() = None;
                     break;
                 }
             }
         });
 
         *self.out.lock().unwrap() = Some(out_tx);
-        self.connected.store(true, Ordering::SeqCst);
 
         let terms = self.terms.clone();
         let pending = self.pending.clone();
         let data_tx = self.data_tx.clone();
         let exit_tx = self.exit_tx.clone();
         let app = self.app.clone();
+        let out_slot = self.out.clone();
         std::thread::spawn(move || {
             let mut reader = reader;
             let mut line = String::new();
@@ -264,6 +254,9 @@ impl PtyManager {
                     _ => {}
                 }
             }
+            /* the daemon is gone: fail fast from here on instead of waiting
+               out a timeout on every request */
+            *out_slot.lock().unwrap() = None;
         });
     }
 
@@ -501,7 +494,6 @@ impl PtyManager {
     pub fn shutdown_host(&self) {
         let _ = self.send(json!({ "t": "shutdown" }));
         self.terms.lock().unwrap().clear();
-        self.connected.store(false, Ordering::SeqCst);
     }
 }
 
@@ -547,49 +539,40 @@ pub fn legacy_tree(ids: &[String], stacked: bool) -> Option<PaneNode> {
 mod tests {
     use super::*;
     use crate::pty_host;
-    use std::sync::atomic::AtomicUsize;
 
-    static HOST_SEQ: AtomicUsize = AtomicUsize::new(0);
-
-    /* run a real daemon in-process on a private address. The tests must not
-       touch the app's own socket, and they must not spawn the release binary
-       (under `cargo test` current_exe() is the harness). */
-    fn host_addr(tag: &str) -> String {
-        let n = HOST_SEQ.fetch_add(1, Ordering::SeqCst);
-        #[cfg(windows)]
-        let addr = format!("\\\\.\\pipe\\bentomux-pty-test-{}-{}-{}", tag, std::process::id(), n);
-        #[cfg(not(windows))]
-        let addr = std::env::temp_dir()
-            .join(format!("bentomux-pty-test-{}-{}-{}.sock", tag, std::process::id(), n))
-            .to_string_lossy()
-            .into_owned();
-        addr
+    /* a private daemon per test: bind first so the test knows the real port,
+       then hand the listener to the server. No fixed port, no bind race. */
+    struct TestHost {
+        addr: std::net::SocketAddr,
+        token: String,
     }
 
-    fn test_manager(tag: &str) -> (String, PtyManager) {
-        let addr = host_addr(tag);
-        let for_server = addr.clone();
+    fn test_manager(tag: &str) -> (TestHost, PtyManager) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind test host");
+        let addr = listener.local_addr().expect("test host addr");
+        let token = format!("test-token-{}-{}", tag, std::process::id());
+        let token_for_server = token.clone();
         std::thread::spawn(move || {
-            pty_host::serve_at(&for_server, false);
+            pty_host::serve(listener, token_for_server, false);
         });
-        /* the listener thread needs a moment to bind. Retry with the manager's
-           own connection: probing with a throwaway one would race it for the
-           daemon's single active-client slot. */
+        let host = TestHost { addr, token };
+        /* the accept loop is already listening; retry only guards the first
+           moment of the server thread starting up */
         let mut last = String::new();
         for _ in 0..300 {
-            match pty_host::connect_at(&addr) {
-                Ok(stream) => return (addr, manager_with(stream)),
+            match pty_host::connect_at(host.addr, &host.token) {
+                Ok(stream) => return (host, manager_with(stream)),
                 Err(error) => {
                     last = error;
                     std::thread::sleep(Duration::from_millis(10));
                 }
             }
         }
-        panic!("test host never came up at {addr}: {last}");
+        panic!("test host never came up at {}: {last}", host.addr);
     }
 
-    fn connect_test_manager(addr: &str) -> PtyManager {
-        let stream = pty_host::connect_at(addr).expect("test host connect");
+    fn connect_test_manager(host: &TestHost) -> PtyManager {
+        let stream = pty_host::connect_at(host.addr, &host.token).expect("test host connect");
         manager_with(stream)
     }
 
@@ -604,7 +587,6 @@ mod tests {
             out: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(HashMap::new())),
             seq: AtomicU64::new(1),
-            connected: AtomicBool::new(false),
         };
         manager.attach_transport(stream);
         manager
@@ -634,7 +616,7 @@ mod tests {
 
     #[test]
     fn test_spawn_write_read_exit() {
-        let (_addr, mgr) = test_manager("spawn");
+        let (_host, mgr) = test_manager("spawn");
         let mut data_rx = mgr.on_term_data();
         let mut exit_rx = mgr.on_term_exit();
 
@@ -698,7 +680,7 @@ mod tests {
        agent CLIs with it, and the next launch must find them again */
     #[test]
     fn test_terms_survive_client_restart() {
-        let (addr, mgr) = test_manager("survive");
+        let (host, mgr) = test_manager("survive");
         let workspace = ws("survive");
         let shell_pref = if cfg!(windows) { Some("cmd") } else { None };
         let id = mgr.create_term(&workspace.id, &workspace.path, shell_pref).expect("spawn");
@@ -713,7 +695,7 @@ mod tests {
         drop(mgr);
 
         /* a fresh app instance reconnects and restores the same tab */
-        let second = connect_test_manager(&addr);
+        let second = connect_test_manager(&host);
         let tabs = vec![TabRec {
             id: id.clone(),
             workspace_id: workspace.id.clone(),
@@ -767,7 +749,7 @@ mod tests {
        chunks would reach the renderer before the replay `attach` sends */
     #[test]
     fn test_reconnected_client_is_not_streamed_before_attach() {
-        let (addr, first) = test_manager("attach-reset");
+        let (host, first) = test_manager("attach-reset");
         let workspace = ws("attach-reset");
         let shell_pref = if cfg!(windows) { Some("cmd") } else { None };
         let id = first.create_term(&workspace.id, &workspace.path, shell_pref).expect("spawn");
@@ -789,7 +771,7 @@ mod tests {
         /* the app "quits" and a new one connects and lists, but does not
            attach yet */
         drop(first);
-        let second = connect_test_manager(&addr);
+        let second = connect_test_manager(&host);
         let live = second.host_terms().expect("list");
         assert!(live.contains_key(&id), "pane should still be listed");
         let mut second_rx = second.on_term_data();
@@ -821,14 +803,14 @@ mod tests {
     /* the daemon must speak the version this build expects */
     #[test]
     fn test_host_reports_the_protocol_version() {
-        let (_addr, mgr) = test_manager("protocol");
+        let (_host, mgr) = test_manager("protocol");
         let status = mgr.host_status().expect("status");
         assert_eq!(status.version, PROTOCOL_VERSION);
     }
 
     #[test]
     fn test_resize_and_unknown_term_errors() {
-        let (_addr, mgr) = test_manager("resize");
+        let (_host, mgr) = test_manager("resize");
         let workspace = ws("resize");
         let id = mgr.create_term(&workspace.id, &workspace.path, None).expect("spawn");
 
@@ -842,7 +824,7 @@ mod tests {
 
     #[test]
     fn test_restore_terms_remaps_and_prunes() {
-        let (_addr, mgr) = test_manager("restore");
+        let (_host, mgr) = test_manager("restore");
         let workspace = ws("restore");
 
         /* a persisted tab with a two-pane split tree under old ids */
@@ -900,7 +882,7 @@ mod tests {
 
     #[test]
     fn test_kill_terms_for_workspace() {
-        let (_addr, mgr) = test_manager("ws-kill");
+        let (_host, mgr) = test_manager("ws-kill");
         let a = ws("ws-a");
         let b = ws("ws-b");
         let ta = mgr.create_term(&a.id, &a.path, None).unwrap();

@@ -2,10 +2,16 @@
    A PTY dies with whoever owns its master fd: when the UI process exited the
    fd closed, the kernel hung up the slave, and every agent CLI in a pane got
    SIGHUP. So the master fds live in a separate daemon instead — the app runs
-   `bentomux --pty-host` on first use and talks to it over the same transport
-   bridge.rs uses (unix socket on unix, named pipe on windows). Quitting,
-   crashing, or force-quitting the app now leaves the agent CLIs running; the
-   next launch lists the live terms and reattaches to them.
+   `bentomux --pty-host` on first use and talks to it over a loopback socket.
+   Quitting, crashing, or force-quitting the app now leaves the agent CLIs
+   running; the next launch lists the live terms and reattaches to them.
+
+   The transport is deliberately the same code on every platform. A per-OS one
+   (unix socket / windows named pipe) cannot be exercised on the machine you
+   are not on, and a transport bug there shows up as every request timing out
+   with nothing in the log — the loopback socket plus the token in the 0600
+   address file gives the same protection as a 0600 unix socket, and is
+   testable anywhere.
 
    Protocol: newline-delimited JSON, one line per message, base64 for the two
    byte-carrying fields. Requests carry an `n` id the reply echoes back.
@@ -14,8 +20,10 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -44,17 +52,54 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 /* idle ticks (1s each) before a daemon with no live pane and no client exits */
 const IDLE_TICKS: u32 = 10;
 
-/* ---------------- address ---------------- */
+/* ---------------- address ----------------
 
-pub fn host_address() -> String {
-    if cfg!(windows) {
-        format!("\\\\.\\pipe\\bentomux-pty{}", instance_suffix())
-    } else {
-        std::env::temp_dir()
-            .join(format!("bentomux-pty{}.sock", instance_suffix()))
-            .to_string_lossy()
-            .into_owned()
+   The daemon publishes where it listens plus a shared secret. The file is
+   owner-only (0600) on unix, which is what keeps another local process from
+   reading the token and driving the user's shells. */
+
+fn address_path() -> PathBuf {
+    std::env::temp_dir().join(format!("bentomux-pty{}.json", instance_suffix()))
+}
+
+struct Address {
+    port: u16,
+    token: String,
+}
+
+fn read_address() -> Option<Address> {
+    let raw = std::fs::read_to_string(address_path()).ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
+    Some(Address {
+        port: value.get("port")?.as_u64()? as u16,
+        token: value.get("token")?.as_str()?.to_string(),
+    })
+}
+
+fn write_address(port: u16, token: &str) -> std::io::Result<()> {
+    let path = address_path();
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    /* created owner-only rather than chmod-ed after, so the token is never
+       briefly world-readable */
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
     }
+    let mut file = opts.open(&path)?;
+    file.write_all(json!({ "port": port, "token": token }).to_string().as_bytes())?;
+    file.flush()
+}
+
+fn clear_address() {
+    let _ = std::fs::remove_file(address_path());
+}
+
+fn new_token() -> String {
+    use base64::Engine;
+    let bytes: [u8; 32] = rand::random();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
 fn log_path() -> std::path::PathBuf {
@@ -68,50 +113,62 @@ pub struct HostStream {
     pub writer: Box<dyn Write + Send>,
 }
 
-#[cfg(unix)]
-fn open_stream(addr: &str) -> std::io::Result<HostStream> {
-    let stream = std::os::unix::net::UnixStream::connect(addr)?;
-    let writer = stream.try_clone()?;
+fn open_stream(addr: &Address) -> std::io::Result<HostStream> {
+    let stream = TcpStream::connect(("127.0.0.1", addr.port))?;
+    let _ = stream.set_nodelay(true);
+    let mut writer = stream.try_clone()?;
+    /* the daemon ignores anything that does not open with the token */
+    writeln!(writer, "{}", json!({ "t": "hello", "token": addr.token }))?;
+    writer.flush()?;
     Ok(HostStream { reader: Box::new(BufReader::new(stream)), writer: Box::new(writer) })
 }
 
-#[cfg(windows)]
-fn open_stream(addr: &str) -> std::io::Result<HostStream> {
-    let file = std::fs::OpenOptions::new().read(true).write(true).open(addr)?;
-    let writer = file.try_clone()?;
-    Ok(HostStream { reader: Box::new(BufReader::new(file)), writer: Box::new(writer) })
-}
-
-#[cfg(not(any(unix, windows)))]
-fn open_stream(_addr: &str) -> std::io::Result<HostStream> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no pty host transport"))
-}
-
-/* connect to a specific daemon address (tests use a private one) */
-pub fn connect_at(addr: &str) -> Result<HostStream, String> {
-    open_stream(addr).map_err(|e| format!("pty host unreachable at {addr}: {e}"))
+/* connect to a specific daemon (tests run a private one) */
+pub fn connect_at(addr: SocketAddr, token: &str) -> Result<HostStream, String> {
+    open_stream(&Address { port: addr.port(), token: token.to_string() })
+        .map_err(|e| format!("pty host unreachable at {addr}: {e}"))
 }
 
 /* connect to the daemon, starting it if nothing is listening yet. The flag is
    true when this call started the daemon, which tells the caller the daemon is
    already current and must not be restarted. */
 pub fn connect_host() -> Result<(HostStream, bool), String> {
-    let addr = host_address();
-    if let Ok(stream) = open_stream(&addr) {
-        return Ok((stream, false));
+    if let Some(addr) = read_address() {
+        if let Ok(stream) = open_stream(&addr) {
+            return Ok((stream, false));
+        }
     }
     spawn_host_process()?;
     let deadline = Instant::now() + CONNECT_TIMEOUT;
     loop {
-        match open_stream(&addr) {
-            Ok(stream) => return Ok((stream, true)),
-            Err(error) => {
-                if Instant::now() >= deadline {
-                    return Err(format!("pty host unreachable at {addr}: {error}"));
-                }
-                std::thread::sleep(Duration::from_millis(50));
+        if let Some(addr) = read_address() {
+            if let Ok(stream) = open_stream(&addr) {
+                return Ok((stream, true));
             }
         }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "pty host unreachable: no daemon published {}",
+                address_path().display()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/* wait until the published address stops answering, so the next connect_host()
+   starts a fresh daemon instead of racing the dying process */
+pub fn wait_host_gone(timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let alive = read_address().map(|addr| open_stream(&addr).is_ok()).unwrap_or(false);
+        if !alive {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -225,7 +282,7 @@ struct HostTerm {
    one keeps its socket but receives nothing. */
 struct ClientSlot {
     generation: u64,
-    tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    tx: Option<mpsc::Sender<String>>,
 }
 
 struct Host {
@@ -242,7 +299,7 @@ impl Host {
     }
 
     /* become the active client; returns the generation to clear later */
-    fn set_client(&self, tx: tokio::sync::mpsc::UnboundedSender<String>) -> u64 {
+    fn set_client(&self, tx: mpsc::Sender<String>) -> u64 {
         let generation = {
             let mut slot = self.client.lock().unwrap();
             slot.generation += 1;
@@ -394,6 +451,7 @@ fn handle_line(host: &Arc<Host>, line: &str) {
                     let _ = term.killer.lock().unwrap().kill();
                 }
             }
+            clear_address();
             std::process::exit(0);
         }
         _ => {}
@@ -511,39 +569,54 @@ fn idle_watch(host: Arc<Host>) {
         /* nothing to preserve and nobody listening: do not linger as a stray
            daemon on the user's machine */
         if idle >= IDLE_TICKS {
+            clear_address();
             std::process::exit(0);
         }
     }
 }
 
-#[cfg(unix)]
-fn serve_loop(addr: &str, host: Arc<Host>) -> i32 {
-    use std::os::unix::fs::PermissionsExt;
-    let listener = match std::os::unix::net::UnixListener::bind(addr) {
-        Ok(listener) => listener,
-        Err(error) => {
-            eprintln!("[bentomux] pty host bind failed on {addr}: {error}");
-            return 1;
-        }
-    };
-    /* the socket types into the user's shells: keep it owner-only */
-    let _ = std::fs::set_permissions(addr, std::fs::Permissions::from_mode(0o600));
+/* Serve until the process is killed. `idle_exit` is off for in-process test
+   servers, which must not take the test harness down with them. */
+pub fn serve(listener: TcpListener, token: String, idle_exit: bool) -> i32 {
+    let host = Arc::new(Host::new());
+    if idle_exit {
+        let watcher = host.clone();
+        std::thread::spawn(move || idle_watch(watcher));
+    }
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let host = host.clone();
-        std::thread::spawn(move || serve_client(stream, &host));
+        let token = token.clone();
+        std::thread::spawn(move || serve_client(stream, &host, &token));
     }
     0
 }
 
-#[cfg(unix)]
-fn serve_client(stream: std::os::unix::net::UnixStream, host: &Arc<Host>) {
+fn serve_client(stream: TcpStream, host: &Arc<Host>, token: &str) {
     let Ok(write_half) = stream.try_clone() else { return };
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+
+    /* first line must carry the token; anything else is dropped without a
+       reply so a stray local process cannot even probe the daemon */
+    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+        return;
+    }
+    let allowed = serde_json::from_str::<Value>(line.trim())
+        .map(|hello| {
+            hello.get("t").and_then(Value::as_str) == Some("hello")
+                && hello.get("token").and_then(Value::as_str) == Some(token)
+        })
+        .unwrap_or(false);
+    if !allowed {
+        return;
+    }
+
+    let (tx, rx) = mpsc::channel::<String>();
     let generation = host.set_client(tx);
     let writer = std::thread::spawn(move || {
         let mut out = write_half;
-        while let Some(line) = rx.blocking_recv() {
+        while let Ok(line) = rx.recv() {
             if out.write_all(line.as_bytes()).is_err() {
                 break;
             }
@@ -552,8 +625,6 @@ fn serve_client(stream: std::os::unix::net::UnixStream, host: &Arc<Host>) {
         let _ = out.shutdown(std::net::Shutdown::Both);
     });
 
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
     loop {
         line.clear();
         match reader.read_line(&mut line) {
@@ -562,102 +633,46 @@ fn serve_client(stream: std::os::unix::net::UnixStream, host: &Arc<Host>) {
         }
         handle_line(host, line.trim());
     }
+
     /* dropping the sender ends the writer thread's loop */
     host.clear_client(generation);
     let _ = writer.join();
 }
 
-#[cfg(windows)]
-fn serve_loop(addr: &str, host: Arc<Host>) -> i32 {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-    let runtime = match tokio::runtime::Runtime::new() {
-        Ok(runtime) => runtime,
+/* entry point for `bentomux --pty-host` */
+pub fn run_host() -> i32 {
+    /* already serving? this instance is redundant */
+    if let Some(addr) = read_address() {
+        if open_stream(&addr).is_ok() {
+            return 0;
+        }
+    }
+    /* port 0 lets the OS pick a free one; the address file is how the app
+       finds it, so the daemon never occupies a fixed port */
+    let listener = match TcpListener::bind(("127.0.0.1", 0)) {
+        Ok(listener) => listener,
         Err(error) => {
-            eprintln!("[bentomux] pty host runtime failed: {error}");
+            eprintln!("[bentomux] pty host bind failed: {error}");
             return 1;
         }
     };
-    runtime.block_on(async move {
-        loop {
-            /* one instance at a time: the app is the only client, and a
-               second instance would just race it for the pipe */
-            let server = match tokio::net::windows::named_pipe::ServerOptions::new().create(addr) {
-                Ok(server) => server,
-                Err(error) => {
-                    eprintln!("[bentomux] pty host pipe bind failed on {addr}: {error}");
-                    return 1;
-                }
-            };
-            if let Err(error) = server.connect().await {
-                eprintln!("[bentomux] pty host pipe accept error: {error}");
-                continue;
-            }
-            let (read_half, mut write_half) = tokio::io::split(server);
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-            let generation = host.set_client(tx);
-            let writer = tokio::spawn(async move {
-                while let Some(line) = rx.recv().await {
-                    if write_half.write_all(line.as_bytes()).await.is_err() {
-                        break;
-                    }
-                    let _ = write_half.flush().await;
-                }
-                let _ = write_half.shutdown().await;
-            });
-
-            let mut reader = tokio::io::BufReader::new(read_half);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
-                }
-                handle_line(&host, line.trim());
-            }
-            host.clear_client(generation);
-            writer.abort();
+    let port = match listener.local_addr() {
+        Ok(addr) => addr.port(),
+        Err(error) => {
+            eprintln!("[bentomux] pty host address failed: {error}");
+            return 1;
         }
-    })
-}
-
-#[cfg(not(any(unix, windows)))]
-fn serve_loop(addr: &str, _host: Arc<Host>) -> i32 {
-    eprintln!("[bentomux] pty host unsupported on this platform: {addr}");
-    1
-}
-
-/* run the server loop on `addr`. `idle_exit` is off for in-process test
-   servers, which must not take the test harness down with them. */
-pub fn serve_at(addr: &str, idle_exit: bool) -> i32 {
-    let host = Arc::new(Host::new());
-    if idle_exit {
-        let watcher = host.clone();
-        std::thread::spawn(move || idle_watch(watcher));
+    };
+    let token = new_token();
+    if let Err(error) = write_address(port, &token) {
+        eprintln!("[bentomux] pty host could not publish its address: {error}");
+        return 1;
     }
-    serve_loop(addr, host)
-}
-
-/* entry point for `bentomux --pty-host` */
-pub fn run_host() -> i32 {
-    let addr = host_address();
-    #[cfg(unix)]
-    {
-        use std::path::Path;
-        if Path::new(&addr).exists() {
-            if connect_at(&addr).is_ok() {
-                /* already serving: this instance is redundant */
-                return 0;
-            }
-            /* a crashed host leaves the socket file behind and bind would
-               fail on it. (ponytail: two daemons racing this unlink can leave
-               one serving an unlinked inode; the app only spawns after a
-               failed connect, so the race needs two launches in the same
-               millisecond.) */
-            let _ = std::fs::remove_file(&addr);
-        }
-    }
-    serve_at(&addr, true)
+    /* (ponytail: two daemons starting at the same instant can both pass the
+       liveness check above and the loser's port is overwritten in the file.
+       The app only spawns after a failed connect, and the loser exits on idle
+       with no panes, so this needs two launches in the same millisecond.) */
+    serve(listener, token, true)
 }
 
 #[cfg(test)]
@@ -692,10 +707,42 @@ mod tests {
     }
 
     #[test]
-    fn address_is_per_instance() {        std::env::remove_var("BENTOMUX_SMOKE");
+    fn address_file_is_per_instance() {
+        std::env::remove_var("BENTOMUX_SMOKE");
         std::env::remove_var("BENTOMUX_USER_DATA_SUFFIX");
-        let addr = host_address();
-        assert!(addr.contains("bentomux-pty"), "addr: {}", addr);
+        let path = address_path();
+        assert!(
+            path.file_name().unwrap().to_string_lossy().contains("bentomux-pty"),
+            "path: {}",
+            path.display()
+        );
+    }
+
+    /* the token is the only thing keeping another local process out of the
+       user's shells, so a wrong one must not be served */
+    #[test]
+    fn wrong_token_is_refused() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            serve(listener, "right-token".to_string(), false);
+        });
+        std::thread::sleep(Duration::from_millis(100));
+
+        assert!(connect_at(addr, "wrong-token").is_ok(), "socket connect still succeeds");
+        let mut bad = connect_at(addr, "wrong-token").expect("connect");
+        /* the daemon drops it, so the request never gets an answer */
+        bad.writer.write_all(b"{\"t\":\"list\",\"n\":1}\n").expect("write");
+        bad.writer.flush().expect("flush");
+        let mut reply = String::new();
+        assert_eq!(bad.reader.read_line(&mut reply).unwrap_or(0), 0, "got: {reply:?}");
+
+        let mut good = connect_at(addr, "right-token").expect("connect");
+        good.writer.write_all(b"{\"t\":\"list\",\"n\":2}\n").expect("write");
+        good.writer.flush().expect("flush");
+        let mut line = String::new();
+        assert!(good.reader.read_line(&mut line).unwrap_or(0) > 0, "token should be accepted");
+        assert_eq!(serde_json::from_str::<Value>(line.trim()).unwrap()["n"], 2);
     }
 
     #[test]
