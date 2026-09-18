@@ -187,8 +187,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # the annotated tag message is the release body: --generate-notes
+          # would throw it away and publish a bare changelog link
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
           find "$BUNDLE_DIR" -type f \( \
             -name '*.dmg' \
             -o -name '*.AppImage' \
