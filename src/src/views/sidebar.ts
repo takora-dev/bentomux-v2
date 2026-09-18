@@ -18,8 +18,13 @@ import { gitPanelPage, refreshChangesPill } from './gitPanel';
 
 const PANE_INDENT = 24;
 
-/* workspace id currently being dragged for sidebar reordering */
+/* Pointer drag state. HTML5 drag/drop is unreliable inside Tauri WebView. */
 let dragWsId: string | null = null;
+let dragPointerId: number | null = null;
+let dragTargetId: string | null = null;
+let dragBelow = false;
+let dragMoved = false;
+let suppressFolderClick = false;
 
 interface PaneRow {
   entry: TabEntry;
@@ -227,56 +232,83 @@ function toggleWorkspaceExpanded(wsId: string, currentlyOpen: boolean): void {
   renderSidebar();
 }
 
-/* ---------------- drag & drop reordering of workspace folders ---------------- */
-
-function startFolderDrag(e: DragEvent, row: HTMLElement, wsId: string): void {
-  dragWsId = wsId;
-  row.classList.add('dragging');
-  if (e.dataTransfer) {
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', wsId);
-  }
-}
-
-function endFolderDrag(row: HTMLElement): void {
-  dragWsId = null;
-  row.classList.remove('dragging');
-  clearDropMarks();
-}
+/* ---------------- pointer drag & drop reordering of workspace folders ---------------- */
 
 function clearRowDropMark(row: HTMLElement): void {
   row.classList.remove('drop-above', 'drop-below');
 }
 
 function clearDropMarks(): void {
-  for (const el of $$('.folder.drop-above, .folder.drop-below')) clearRowDropMark(el);
+  for (const el of $$('.folder.drop-above, .folder.drop-below')) {
+    clearRowDropMark(el);
+  }
 }
 
 function markDropTarget(row: HTMLElement, below: boolean): void {
   clearDropMarks();
   row.classList.add(below ? 'drop-below' : 'drop-above');
+  dragTargetId = row.dataset.ws || null;
+  dragBelow = below;
 }
 
-function folderDragOver(e: DragEvent, row: HTMLElement, wsId: string): void {
-  if (!dragWsId || dragWsId === wsId) return;
-  e.preventDefault();
-  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-  const r = row.getBoundingClientRect();
-  markDropTarget(row, e.clientY > r.top + r.height / 2);
+function updateFolderDrag(x: number, y: number): void {
+  if (!dragWsId) return;
+  const target = document.elementFromPoint(x, y)?.closest('.folder');
+  if (!(target instanceof HTMLElement) || target.dataset.ws === dragWsId) {
+    dragTargetId = null;
+    clearDropMarks();
+    return;
+  }
+  const bounds = target.getBoundingClientRect();
+  markDropTarget(target, y > bounds.top + bounds.height / 2);
 }
 
-function folderDrop(e: DragEvent, row: HTMLElement, targetWsId: string): void {
-  if (!dragWsId || dragWsId === targetWsId) return;
+function finishFolderDrag(): void {
+  const sourceId = dragWsId;
+  const targetId = dragTargetId;
+  const below = dragBelow;
+  dragWsId = null;
+  dragPointerId = null;
+  dragTargetId = null;
+  clearDropMarks();
+  document.body.classList.remove('workspace-dragging');
+  if (sourceId && targetId && sourceId !== targetId) {
+    void commitWorkspaceReorder(sourceId, targetId, below);
+  }
+}
+
+function startFolderPointerDrag(e: PointerEvent, row: HTMLElement, wsId: string): void {
+  if (e.button !== 0 || (e.target instanceof HTMLElement &&
+      e.target.closest('.ws-menu'))) return;
+  dragWsId = wsId;
+  dragPointerId = e.pointerId;
+  dragMoved = false;
+  row.setPointerCapture(e.pointerId);
   e.preventDefault();
-  const r = row.getBoundingClientRect();
-  void commitWorkspaceReorder(targetWsId, e.clientY > r.top + r.height / 2);
+}
+
+function moveFolderPointerDrag(e: PointerEvent): void {
+  if (dragPointerId !== e.pointerId || !dragWsId) return;
+  dragMoved = true;
+  document.body.classList.add('workspace-dragging');
+  updateFolderDrag(e.clientX, e.clientY);
+}
+
+function endFolderPointerDrag(e: PointerEvent): void {
+  if (dragPointerId !== e.pointerId) return;
+  if (dragMoved) {
+    e.preventDefault();
+    suppressFolderClick = true;
+  }
+  finishFolderDrag();
 }
 
 /* persist the dragged workspace above/below the drop target */
-async function commitWorkspaceReorder(targetWsId: string, below: boolean): Promise<void> {
-  const dragId = dragWsId;
-  dragWsId = null;
-  if (!dragId) return;
+async function commitWorkspaceReorder(
+  dragId: string,
+  targetWsId: string,
+  below: boolean,
+): Promise<void> {
   const ids = db.workspaces.map(w => w.id);
   const from = ids.indexOf(dragId);
   if (from < 0 || !ids.includes(targetWsId)) return;
@@ -292,17 +324,21 @@ function workspaceFolder(ws: { id: string; name: string; path: string }, open: b
     class: 'folder' + (open ? ' open' : ''),
     title: ws.path,
     'data-ws': ws.id,
-    onclick: () => toggleWorkspaceExpanded(ws.id, open),
+    onclick: () => {
+      if (suppressFolderClick) {
+        suppressFolderClick = false;
+        return;
+      }
+      toggleWorkspaceExpanded(ws.id, open);
+    },
   },
     h('span', { class: 'folder-icon', html: IC.folder }),
     h('span', { class: 'folder-name' }, ws.name),
     workspaceMenuSpan(ws));
-  row.draggable = true;
-  row.addEventListener('dragstart', e => startFolderDrag(e, row, ws.id));
-  row.addEventListener('dragend', () => endFolderDrag(row));
-  row.addEventListener('dragover', e => folderDragOver(e, row, ws.id));
-  row.addEventListener('dragleave', () => clearRowDropMark(row));
-  row.addEventListener('drop', e => folderDrop(e, row, ws.id));
+  row.addEventListener('pointerdown', e => startFolderPointerDrag(e, row, ws.id));
+  row.addEventListener('pointermove', moveFolderPointerDrag);
+  row.addEventListener('pointerup', endFolderPointerDrag);
+  row.addEventListener('pointercancel', finishFolderDrag);
   return row;
 }
 

@@ -208,9 +208,14 @@ body.pane-hidden .sidebar{opacity:0;border-color:transparent;pointer-events:none
 }
 .folder-name{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .folder-icon{display:flex;color:var(--ink-3)}
-.folder.dragging{opacity:.4}
-.folder.drop-above{box-shadow:inset 0 2px 0 var(--accent)}
-.folder.drop-below{box-shadow:inset 0 -2px 0 var(--accent)}
+.folder{position:relative}
+.folder.dragging{opacity:.45;transform:scale(.98);background:var(--surface-2);box-shadow:0 4px 12px color-mix(in srgb,var(--ink) 16%,transparent)}
+body.workspace-dragging{user-select:none;cursor:grabbing}
+body.workspace-dragging .folder{cursor:grabbing}
+.folder.drop-above,.folder.drop-below{background:color-mix(in srgb,var(--accent) 8%,transparent)}
+.folder.drop-above::before,.folder.drop-below::after{content:"";position:absolute;left:5px;right:5px;height:3px;border-radius:3px;background:var(--accent);box-shadow:0 0 7px color-mix(in srgb,var(--accent) 55%,transparent);pointer-events:none}
+.folder.drop-above::before{top:-2px}
+.folder.drop-below::after{bottom:-2px}
 .empty-note{padding:2px 9px 2px 40px;color:var(--ink-3);font-size:12px}
 
 /* ---------------- pages ---------------- */
