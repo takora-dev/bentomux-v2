@@ -514,15 +514,19 @@ fn settle(pending: &Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>>, msg: &Value) 
     }
 }
 
-/* 't-' + millis in base36 + 4 random base36 chars, like the TS version */
+/* 't-' + millis in base36 + a per-process counter, padded to the same 4 chars
+   the TS version's random suffix had. The counter replaced 4 random base36
+   chars because those collide by the birthday problem: 100 ids out of 36^4
+   fail ~0.3% of the time, and a collision means two panes share one id. The
+   daemon is the only caller, so a counter is unique for as long as ids live. */
 pub fn new_term_id() -> String {
-    use rand::Rng;
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let millis = (chrono::Utc::now().timestamp_millis().max(0)) as u64;
-    let rnd: u32 = rand::thread_rng().gen_range(0..36u32.pow(4));
+    let seq = SEQUENCE.fetch_add(1, Ordering::Relaxed);
     format!(
         "t-{}{:0>4}",
         crate::split_tree::to_base36(millis),
-        crate::split_tree::to_base36(rnd as u64)
+        crate::split_tree::to_base36(seq)
     )
 }
 
