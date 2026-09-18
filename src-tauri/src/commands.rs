@@ -748,10 +748,12 @@ pub fn win_close(window: tauri::Window) {
 }
 
 /* Kill cloudflared and the remote HTTP server before the NSIS/MSI installer
-   overwrites cloudflared.exe. Called by the renderer immediately before
-   tauri-plugin-updater's downloadAndInstall() on Windows. */
+   overwrites cloudflared.exe, and stop the pty host: on Windows the installer
+   cannot replace a running exe, and the host is that exe. Called by the
+   renderer immediately before tauri-plugin-updater's downloadAndInstall(). */
 #[tauri::command]
-pub fn shutdown_for_update() {
+pub fn shutdown_for_update(pty: State<'_, PtyManager>) {
+    pty.shutdown_host();
     crate::remote::stop_tunnel();
     crate::remote::stop_remote();
 }
