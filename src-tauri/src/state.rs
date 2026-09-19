@@ -274,8 +274,13 @@ impl AppStateManager {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
             .unwrap_or_else(|| PathBuf::from("."));
-        // Must match tauri.conf.json `identifier` → Tauri appends the identifier as the dir name.
-        base.join("app.bentomux.desktop").join("bentomux.json")
+        // Must match the active Tauri identifier so dev and production stores stay separate.
+        let identifier = if std::env::var_os("BENTOMUX_USER_DATA_SUFFIX").is_some() {
+            "app.bentomux.dev"
+        } else {
+            "app.bentomux.desktop"
+        };
+        base.join(identifier).join("bentomux.json")
     }
 
     /* wires the store to the Tauri app data dir (userData equivalent) */

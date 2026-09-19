@@ -16,7 +16,8 @@
     "test:backend": "node scripts/test-backend.mjs",
     "test:release": "node scripts/release-manifest.mjs --selftest",
     "test:installer": "sh scripts/verify-installer.sh",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:dev": "node scripts/tauri-dev.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.0",
