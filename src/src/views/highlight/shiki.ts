@@ -58,39 +58,25 @@ const SHIKI_LANG: Record<LangId, ShikiLang> = {
 let highlighterPromise: Promise<HighlighterCore> | null = null;
 const languagePromises = new Map<ShikiLang, Promise<void>>();
 
-/* dynamic import map for all 29 languages we support. Vite code-splits each
-   entry, so unused grammars are never downloaded. Keyed by Shiki's full
-   language name (so Vite emits stable filenames). */
+/* Keep common grammars bundled as lazy chunks. Less common languages remain
+   detectable and fall back to plain text when no loader is registered. */
 const LANG_LOADERS: Partial<Record<ShikiLang, () => Promise<{ default: LanguageInput }>>> = {
   javascript: () => import('@shikijs/langs/javascript'),
   typescript: () => import('@shikijs/langs/typescript'),
   tsx: () => import('@shikijs/langs/tsx'),
   jsx: () => import('@shikijs/langs/jsx'),
   python: () => import('@shikijs/langs/python'),
-  ruby: () => import('@shikijs/langs/ruby'),
   go: () => import('@shikijs/langs/go'),
   rust: () => import('@shikijs/langs/rust'),
-  java: () => import('@shikijs/langs/java'),
-  kotlin: () => import('@shikijs/langs/kotlin'),
-  csharp: () => import('@shikijs/langs/csharp'),
-  cpp: () => import('@shikijs/langs/cpp'),
-  c: () => import('@shikijs/langs/c'),
-  swift: () => import('@shikijs/langs/swift'),
-  php: () => import('@shikijs/langs/php'),
   bash: () => import('@shikijs/langs/bash'),
   sql: () => import('@shikijs/langs/sql'),
   html: () => import('@shikijs/langs/html'),
   css: () => import('@shikijs/langs/css'),
-  scss: () => import('@shikijs/langs/scss'),
   json: () => import('@shikijs/langs/json'),
   yaml: () => import('@shikijs/langs/yaml'),
   toml: () => import('@shikijs/langs/toml'),
   markdown: () => import('@shikijs/langs/markdown'),
   xml: () => import('@shikijs/langs/xml'),
-  lua: () => import('@shikijs/langs/lua'),
-  perl: () => import('@shikijs/langs/perl'),
-  r: () => import('@shikijs/langs/r'),
-  dart: () => import('@shikijs/langs/dart'),
 };
 
 

@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "measure:build": "node scripts/measure-build.mjs",
     "prepare:cloudflared": "node scripts/prepare-cloudflared.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",

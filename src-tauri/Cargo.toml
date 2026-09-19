@@ -59,6 +59,10 @@ windows = { version = "0.58", features = ["Win32_System_Pipes", "Win32_Storage_F
 [target.'cfg(unix)'.dependencies]
 # Unix socket support included in tokio
 
+[profile.dev]
+debug = 1
+incremental = true
+
 [profile.release]
 codegen-units = 1
 lto = true
