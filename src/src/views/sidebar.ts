@@ -8,7 +8,11 @@ import { db, branches, runtime, activity, setDb } from '../store';
 import { go } from '../router';
 import { render } from '../render';
 import { activate, closeTerminalPane, leavesOf, newTerminalTab } from './tabs';
-import { mostRecentPane, primePaneFocus } from './terminal';
+import {
+  mostRecentPane,
+  primePaneFocus,
+  clearTerminalSelections,
+} from './terminal';
 import { openModal } from '../components/modal';
 import { closeContextMenu, contextMenuAnchoredTo, openContextMenu, type MenuEntry } from '../components/menu';
 import { openSearchModal } from './search';
@@ -327,6 +331,7 @@ function settingsGearButton(): HTMLElement {
 }
 
 export function toggleGitPanel(): void {
+  clearTerminalSelections();
   ui.gitPanelOpen = !ui.gitPanelOpen;
   document.body.classList.toggle('git-panel-open', ui.gitPanelOpen);
   renderSidebar();

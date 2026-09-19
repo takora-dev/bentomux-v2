@@ -314,6 +314,11 @@ function ensureLive(tabId: string): Live {
   return live;
 }
 
+export function clearTerminalSelections(): void {
+  for (const live of lives.values()) live.term.clearSelection();
+  document.getSelection()?.removeAllRanges();
+}
+
 export function disposeTerminal(tabId: string): void {
   const live = lives.get(tabId);
   if (!live) return;

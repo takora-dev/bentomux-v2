@@ -16,7 +16,12 @@ import { renderTabs, activate, stepHistory, registerRestoredTab } from './views/
 import { addWorkspaceFlow, renderSidebar, toggleGitPanel } from './views/sidebar';
 import { agentsPage, agentDetailPage } from './views/agents';
 import { welcomePage } from './views/welcome';
-import { initTerminalEvents, terminalPage, applyTerminalFont } from './views/terminal';
+import {
+  initTerminalEvents,
+  terminalPage,
+  applyTerminalFont,
+  clearTerminalSelections,
+} from './views/terminal';
 import { initKeyboard } from './keyboard';
 import { diffPage } from './views/diff';
 import { refreshChangesPill } from './views/gitPanel';
@@ -112,6 +117,7 @@ function renderContentInner(route: Route): void {
 /* ---------------- app bar wiring ---------------- */
 
 function togglePaneHidden(): void {
+  clearTerminalSelections();
   db.prefs.paneHidden = !(db.prefs.paneHidden === true);
   void window.bentomux.setPrefs({ paneHidden: db.prefs.paneHidden });
   document.body.classList.toggle('pane-hidden', db.prefs.paneHidden === true);
