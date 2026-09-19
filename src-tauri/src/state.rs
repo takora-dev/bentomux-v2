@@ -100,7 +100,9 @@ pub struct Prefs {
 impl Default for Prefs {
     fn default() -> Self {
         Prefs {
-            theme: Some("light".to_string()),
+            /* "system" so a fresh install follows the OS appearance; an
+               explicit light/dark pick is persisted and wins from then on */
+            theme: Some("system".to_string()),
             palette: Some("default".to_string()),
             font: None,
             font_size: None,
@@ -474,7 +476,7 @@ mod tests {
         assert!(st.workspaces.is_empty());
         assert!(st.open_tabs.is_empty());
         assert_eq!(st.active_workspace_id, None);
-        assert_eq!(st.prefs.theme.as_deref(), Some("light"));
+        assert_eq!(st.prefs.theme.as_deref(), Some("system"));
         assert_eq!(st.prefs.palette.as_deref(), Some("default"));
         assert_eq!(st.prefs.pane_hidden, Some(false));
         assert_eq!(st.prefs.sidebar_width, Some(248.0));
