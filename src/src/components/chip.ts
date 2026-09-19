@@ -2,7 +2,7 @@
    One component for every agent mention: cards, modal assignment,
    detected-agents section. Undetected agents render muted with a hint. */
 
-import { h } from '../dom';
+import { h, markup } from '../dom';
 import { DIA } from '../icons';
 import type { AgentInfo } from '../../shared/types';
 
@@ -11,6 +11,6 @@ export function chipEl(a: AgentInfo | null | undefined, opts: { lg?: boolean; ca
   const cls = 'chip' + (opts.lg ? ' lg' : '') + (!a.detected ? ' muted' : '');
   const title = !a.detected ? 'Not detected' : opts.capabilityNote || '';
   return h('span', { class: cls, title: title || null },
-    h('span', { class: 'dia', html: DIA }),
+    markup('span', { class: 'dia' }, DIA),
     h('span', { class: 'nm' }, a.name));
 }

@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State as AxState;
@@ -36,6 +37,20 @@ pub const DEFAULT_REMOTE_PORT: u16 = 8765;
 /* watched panes re-serialize at most this often, and only while output
    is actually moving */
 const WATCH_TICK_MS: u64 = 250;
+
+/* The pairing token in the QR is exchanged once for an HttpOnly cookie and
+   never used as a session: it stays out of browser history, Referer headers,
+   and any proxy log that records query strings. */
+const SESSION_COOKIE: &str = "bentomux_session";
+const SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+const MAX_SESSIONS: usize = 32;
+
+/* bounds on what a single socket may send, and how fast */
+const MAX_WS_MESSAGE: usize = 64 * 1024;
+const MAX_WRITE_BYTES: usize = 8 * 1024;
+const MAX_INBOUND_PER_SEC: u32 = 200;
+/* pairing-token guesses allowed per minute across all connections */
+const MAX_AUTH_PER_MIN: u32 = 30;
 
 /* ---------------- renderer-facing types (shared/types) ---------------- */
 
@@ -190,12 +205,119 @@ fn remote_page_html(app: &tauri::AppHandle) -> String {
 #[derive(Clone)]
 struct WsCtx {
     token: Arc<String>,
+    sessions: Arc<Sessions>,
     out: tokio::sync::broadcast::Sender<RemoteMsg>,
     app: tauri::AppHandle,
 }
 
-fn valid_token(params: &HashMap<String, String>, expected: &str) -> bool {
-    params.get("t").map(String::as_str) == Some(expected)
+/* ---------------- auth: cookie sessions + rate limits ---------------- */
+
+/* byte-wise compare; the token length is fixed and public, the bytes are what
+   must not be guessable one byte at a time */
+fn ct_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/* fixed-window counter: no dependency, and enough to stop a leaked URL from
+   hammering the socket or grinding the pairing token */
+struct RateLimit {
+    start: Instant,
+    count: u32,
+    max: u32,
+    window: Duration,
+}
+
+impl RateLimit {
+    fn new(max: u32, window: Duration) -> Self {
+        Self { start: Instant::now(), count: 0, max, window }
+    }
+
+    fn allow(&mut self) -> bool {
+        let now = Instant::now();
+        if now.duration_since(self.start) >= self.window {
+            self.start = now;
+            self.count = 0;
+        }
+        self.count += 1;
+        self.count <= self.max
+    }
+}
+
+static AUTH_LIMIT: std::sync::OnceLock<Mutex<RateLimit>> = std::sync::OnceLock::new();
+
+fn auth_allowed() -> bool {
+    AUTH_LIMIT
+        .get_or_init(|| Mutex::new(RateLimit::new(MAX_AUTH_PER_MIN, Duration::from_secs(60))))
+        .lock()
+        .unwrap()
+        .allow()
+}
+
+/* live browser sessions. Capped and expired so a long-running app cannot
+   accumulate them; every use slides the expiry forward. */
+#[derive(Default)]
+struct Sessions {
+    map: Mutex<HashMap<String, Instant>>,
+}
+
+impl Sessions {
+    fn create(&self) -> String {
+        let mut map = self.map.lock().unwrap();
+        let now = Instant::now();
+        map.retain(|_, seen| now.duration_since(*seen) < SESSION_TTL);
+        while map.len() >= MAX_SESSIONS {
+            let Some(oldest) = map.iter().min_by_key(|(_, seen)| **seen).map(|(id, _)| id.clone()) else { break };
+            map.remove(&oldest);
+        }
+        let id = random_token();
+        map.insert(id.clone(), now);
+        id
+    }
+
+    fn valid(&self, id: &str) -> bool {
+        let mut map = self.map.lock().unwrap();
+        let now = Instant::now();
+        map.retain(|_, seen| now.duration_since(*seen) < SESSION_TTL);
+        let Some(seen) = map.get_mut(id) else { return false };
+        *seen = now;
+        true
+    }
+}
+
+fn session_from_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
+    let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    for part in raw.split(';') {
+        if let Some((key, value)) = part.split_once('=') {
+            if key.trim() == SESSION_COOKIE {
+                return Some(value.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn session_cookie(id: &str, secure: bool) -> String {
+    let mut c = format!(
+        "{SESSION_COOKIE}={id}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
+        SESSION_TTL.as_secs()
+    );
+    if secure {
+        c.push_str("; Secure");
+    }
+    c
+}
+
+/* one response for every auth failure: no oracle telling a guesser whether
+   the token existed, only whether it was right */
+fn auth_failed() -> axum::response::Response {
+    (
+        axum::http::StatusCode::UNAUTHORIZED,
+        "Bentomux remote: open the pairing URL shown in Settings \u{2192} Remote.",
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -203,23 +325,85 @@ mod ws_auth_regression {
     use super::*;
 
     #[test]
-    fn rejects_missing_and_wrong_tokens() {
-        assert!(!valid_token(&HashMap::new(), "secret-tok"));
-        assert!(!valid_token(&HashMap::from([(String::from("t"), String::from("wrong"))]), "secret-tok"));
+    fn ct_eq_rejects_missing_and_wrong_tokens() {
+        assert!(!ct_eq("", "secret-tok"));
+        assert!(!ct_eq("wrong", "secret-tok"));
+        assert!(!ct_eq("secret-tol", "secret-tok"));
     }
 
     #[test]
-    fn accepts_correct_token() {
-        assert!(valid_token(&HashMap::from([(String::from("t"), String::from("secret-tok"))]), "secret-tok"));
+    fn ct_eq_accepts_exact_token() {
+        assert!(ct_eq("secret-tok", "secret-tok"));
+    }
+
+    #[test]
+    fn cookie_round_trips_and_ignores_other_cookies() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            "theme=dark; bentomux_session=sid-1; other=1".parse().unwrap(),
+        );
+        assert_eq!(session_from_cookie(&headers).as_deref(), Some("sid-1"));
+        assert_eq!(session_from_cookie(&axum::http::HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn session_expires_and_is_required() {
+        let sessions = Sessions::default();
+        assert!(!sessions.valid("nope"));
+        let id = sessions.create();
+        assert!(sessions.valid(&id));
+        sessions
+            .map
+            .lock()
+            .unwrap()
+            .insert(id.clone(), Instant::now() - SESSION_TTL - Duration::from_secs(1));
+        assert!(!sessions.valid(&id));
+    }
+
+    #[test]
+    fn sessions_are_capped() {
+        let sessions = Sessions::default();
+        for _ in 0..MAX_SESSIONS + 5 {
+            sessions.create();
+        }
+        assert_eq!(sessions.map.lock().unwrap().len(), MAX_SESSIONS);
+    }
+
+    #[test]
+    fn rate_limit_closes_the_window() {
+        let mut rl = RateLimit::new(2, Duration::from_secs(60));
+        assert!(rl.allow());
+        assert!(rl.allow());
+        assert!(!rl.allow());
     }
 }
 
+/* The pairing URL carries the token exactly once. It is traded here for an
+   HttpOnly session cookie and the browser is redirected to the bare path, so
+   the token leaves the address bar before the page even renders. */
 async fn handle_page(
     AxState(st): AxState<WsCtx>,
+    headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if !valid_token(&params, st.token.as_str()) {
-        return (axum::http::StatusCode::UNAUTHORIZED, "Bentomux remote: open the pairing URL shown in Settings → Remote.".to_string()).into_response();
+    if let Some(token) = params.get("t") {
+        if !auth_allowed() || !ct_eq(token, st.token.as_str()) {
+            return auth_failed();
+        }
+        /* cloudflared terminates TLS and says so; a direct loopback hit is
+           plain HTTP, where a Secure cookie would simply be dropped */
+        let secure = headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok()) == Some("https");
+        let mut res = axum::http::HeaderMap::new();
+        res.insert(axum::http::header::LOCATION, "/".parse().unwrap());
+        res.insert(
+            axum::http::header::SET_COOKIE,
+            session_cookie(&st.sessions.create(), secure).parse().unwrap(),
+        );
+        return (axum::http::StatusCode::SEE_OTHER, res).into_response();
+    }
+    if !st.sessions.valid(&session_from_cookie(&headers).unwrap_or_default()) {
+        return auth_failed();
     }
     (
         axum::http::StatusCode::OK,
@@ -229,15 +413,20 @@ async fn handle_page(
         .into_response()
 }
 
+/* the pairing token is never accepted here: a socket has to present the
+   session cookie the page exchange issued */
 async fn handle_ws(
     ws: WebSocketUpgrade,
     AxState(st): AxState<WsCtx>,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    if !valid_token(&params, st.token.as_str()) {
-        return (axum::http::StatusCode::UNAUTHORIZED, "invalid token").into_response();
+    if !st.sessions.valid(&session_from_cookie(&headers).unwrap_or_default()) {
+        return auth_failed();
     }
-    ws.on_upgrade(move |socket| client_loop(socket, st)).into_response()
+    ws.max_message_size(MAX_WS_MESSAGE)
+        .max_frame_size(MAX_WS_MESSAGE)
+        .on_upgrade(move |socket| client_loop(socket, st))
+        .into_response()
 }
 
 async fn send_json(sender: &mut SplitSink<WebSocket, Message>, body: String) -> bool {
@@ -249,6 +438,9 @@ async fn client_loop(ws: WebSocket, st: WsCtx) {
     let (mut sender, mut receiver) = ws.split();
     let pane_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let mut out_rx = st.out.subscribe();
+    /* a phone types in bursts, not floods: anything past this is dropped with
+       the connection rather than forwarded into a shell */
+    let mut inbound_limit = RateLimit::new(MAX_INBOUND_PER_SEC, Duration::from_secs(1));
 
     /* everything a fresh client needs: identity, current state */
     send_json(&mut sender, js(&json!({"t": "hello"}))).await;
@@ -264,7 +456,12 @@ async fn client_loop(ws: WebSocket, st: WsCtx) {
                 let Some(incoming) = inbound else { break };
                 let msg = match incoming { Ok(m) => m, Err(_) => break };
                 match msg {
-                    Message::Text(text) => handle_incoming(text, &pane_id, &mut sender, &st.app).await,
+                    Message::Text(text) => {
+                        if !inbound_limit.allow() {
+                            break;
+                        }
+                        handle_incoming(text, &pane_id, &mut sender, &st.app).await
+                    }
                     Message::Close(_) => break,
                     _ => {}
                 }
@@ -293,8 +490,19 @@ async fn client_loop(ws: WebSocket, st: WsCtx) {
     }
 }
 
+/* ids of panes that currently exist and are alive; a remote client may only
+   watch or type into one of these */
+fn live_panes(app: &tauri::AppHandle) -> Vec<String> {
+    app.state::<crate::pty::PtyManager>()
+        .live_terms()
+        .into_iter()
+        .map(|t| t.id)
+        .collect()
+}
+
 /* strict wire messages from the phone; anything malformed is ignored.
-   "write" is full control — it types into the watched pane. */
+   "write" is full control — it types into the pane this connection is
+   currently watching. */
 async fn handle_incoming(
     text: String,
     pane_id: &Arc<Mutex<Option<String>>>,
@@ -309,6 +517,9 @@ async fn handle_incoming(
     match m.get("t").and_then(|v| v.as_str()) {
         Some("watch") => {
             if let Some(pid) = m.get("paneId").and_then(|v| v.as_str()) {
+                if !live_panes(app).iter().any(|id| id == pid) {
+                    return;
+                }
                 *pane_id.lock().unwrap() = Some(pid.to_string());
                 let html = crate::detect::screen::screen_dump_html(pid);
                 let text = crate::detect::screen::screen_dump(pid);
@@ -322,7 +533,9 @@ async fn handle_incoming(
         Some("write") => {
             let pid = m.get("paneId").and_then(|v| v.as_str());
             let data = m.get("data").and_then(|v| v.as_str());
-            if let Some((pid, data)) = valid_write(pid, data) {
+            let watched = pane_id.lock().unwrap().clone();
+            let live = live_panes(app);
+            if let Some((pid, data)) = valid_write(watched.as_deref(), pid, data, &live) {
                 let _ = app.state::<crate::pty::PtyManager>().write_term(pid, data);
             }
         }
@@ -337,15 +550,21 @@ async fn handle_incoming(
     }
 }
 
-/* a write is only delivered when the pane is live and the payload isn't
-   empty — validated against the live pane set at call time */
+/* a write is only delivered when it targets the pane this connection is
+   currently watching, that pane is still live, and the payload is bounded */
 fn valid_write<'a>(
+    watched: Option<&'a str>,
     pane_id: Option<&'a str>,
     data: Option<&'a str>,
+    live: &[String],
 ) -> Option<(&'a str, &'a str)> {
+    let watched = watched?;
     let pid = pane_id?;
     let data = data?;
-    if data.is_empty() {
+    if pid != watched || data.is_empty() || data.len() > MAX_WRITE_BYTES {
+        return None;
+    }
+    if !live.iter().any(|id| id == pid) {
         return None;
     }
     Some((pid, data))
@@ -355,16 +574,39 @@ fn valid_write<'a>(
 mod write_validation {
     use super::*;
 
-    #[test]
-    fn rejects_missing_or_empty_write() {
-        assert!(valid_write(None, Some("ls")).is_none());
-        assert!(valid_write(Some("t-1"), None).is_none());
-        assert!(valid_write(Some("t-1"), Some("")).is_none());
+    fn live() -> Vec<String> {
+        vec!["t-1".to_string(), "t-2".to_string()]
     }
 
     #[test]
-    fn accepts_nonempty_write() {
-        let (pid, data) = valid_write(Some("t-1"), Some("ls -la\r")).expect("valid");
+    fn rejects_missing_or_empty_write() {
+        let l = live();
+        assert!(valid_write(Some("t-1"), None, Some("ls"), &l).is_none());
+        assert!(valid_write(Some("t-1"), Some("t-1"), None, &l).is_none());
+        assert!(valid_write(Some("t-1"), Some("t-1"), Some(""), &l).is_none());
+    }
+
+    #[test]
+    fn rejects_a_pane_this_connection_is_not_watching() {
+        let l = live();
+        assert!(valid_write(None, Some("t-1"), Some("ls"), &l).is_none());
+        assert!(valid_write(Some("t-1"), Some("t-2"), Some("ls"), &l).is_none());
+    }
+
+    #[test]
+    fn rejects_a_pane_that_is_not_live() {
+        assert!(valid_write(Some("t-9"), Some("t-9"), Some("ls"), &live()).is_none());
+    }
+
+    #[test]
+    fn rejects_an_oversized_payload() {
+        let big = "a".repeat(MAX_WRITE_BYTES + 1);
+        assert!(valid_write(Some("t-1"), Some("t-1"), Some(&big), &live()).is_none());
+    }
+
+    #[test]
+    fn accepts_the_watched_live_pane() {
+        let (pid, data) = valid_write(Some("t-1"), Some("t-1"), Some("ls -la\r"), &live()).expect("valid");
         assert_eq!(pid, "t-1");
         assert_eq!(data, "ls -la\r");
     }
@@ -458,6 +700,7 @@ pub fn start_remote(app: &tauri::AppHandle, state: &AppStateManager) {
 
     let ctx = WsCtx {
         token: Arc::new(token),
+        sessions: Arc::new(Sessions::default()),
         out: out_tx.clone(),
         app: app.clone(),
     };

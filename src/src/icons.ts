@@ -1,6 +1,6 @@
 /* ---------------- icons & glyphs ---------------- */
 
-import { h } from './dom';
+import { h, markup } from './dom';
 
 export const DIA = '<svg width="9" height="9" viewBox="0 0 10 10"><rect x="2.2" y="2.2" width="5.6" height="5.6" transform="rotate(45 5 5)" fill="currentColor"/></svg>';
 
@@ -23,4 +23,4 @@ export const IC = {
   phone:  '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linejoin="round"><rect x="4.5" y="1.5" width="7" height="13" rx="1.5"/><path d="M7 12.5h2" stroke-linecap="round"/></svg>',
 };
 
-export const ic = (name: keyof typeof IC): HTMLElement => h('span', { class: 'ic', html: IC[name] });
+export const ic = (name: keyof typeof IC): HTMLElement => markup('span', { class: 'ic' }, IC[name]);

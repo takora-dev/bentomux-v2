@@ -66,7 +66,7 @@ function buildHeader(state: PanelState, paint: () => void): HTMLElement {
       'aria-label': 'Refresh',
       disabled: state.loading,
     },
-      h('span', { html: '↻', style: 'font-size:14px' })));
+      h('span', { style: 'font-size:14px' }, '↻')));
 }
 
 function buildFilesList(state: PanelState): HTMLElement {

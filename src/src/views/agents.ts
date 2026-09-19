@@ -9,7 +9,7 @@
    The detail header also carries a back button + a small "switch agent"
    affordance (re-enter the picker). */
 
-import { h } from '../dom';
+import { h, markup } from '../dom';
 import { ic, IC } from '../icons';
 import { chipEl } from '../components/chip';
 import { field } from '../components/modal';
@@ -57,7 +57,7 @@ function agentCard(a: AgentInfo, open: (info: AgentInfo, tab: SubTab) => void): 
     onclick: () => open(a, 'model'),
   },
     h('div', { class: 'agent-card-h' },
-      h('span', { class: 'agent-card-avatar', html: IC.bot }),
+      markup('span', { class: 'agent-card-avatar' }, IC.bot),
       h('div', { class: 'agent-card-id' },
         h('b', {}, a.name),
         h('span', { class: 'agent-card-detect ' + (detected ? 'on' : 'off') },
@@ -155,7 +155,7 @@ async function loadItemForEdit(kind: ResourceKind, id: string | undefined): Prom
 
 function richEmpty(meta: { title: string; singular: string; icon: 'chat' | 'lines' | 'board' | 'bot' }, onCreate: () => void): HTMLElement {
   return h('div', { class: 'empty rich-empty' },
-    h('span', { class: 'empty-icon', html: IC[meta.icon] }),
+    markup('span', { class: 'empty-icon' }, IC[meta.icon]),
     h('p', { class: 'empty-title' }, 'No ' + meta.title.toLowerCase() + ' yet'),
     h('p', { class: 'empty-sub' }, 'Add the first ' + meta.singular + ' for this agent to see it here.'),
     h('button', { class: 'btn primary', onclick: onCreate }, '+ New ' + meta.singular));
@@ -171,7 +171,7 @@ function resourceCard(kind: ResourceKind, item: ResourceItem, onToggle: (id: str
   const off = item.status === 'off';
   const card = h('button', { class: 'resource-card' + (off ? ' off' : ''), type: 'button', onclick: onEdit },
     h('div', { class: 'resource-card-head' },
-      h('span', { class: 'resource-icon', html: IC[meta.icon] }),
+      markup('span', { class: 'resource-icon' }, IC[meta.icon]),
       h('b', {}, item.name),
       h('span', { class: 'res-switch', onclick: (e: Event) => e.stopPropagation() }, activeSwitch(item, onToggle))),
     h('p', { class: 'resource-card-preview' }, preview));
@@ -185,7 +185,7 @@ function resourceRow(kind: ResourceKind, item: ResourceItem, onToggle: (id: stri
     class: 'row res-row' + (off ? ' off' : ''), role: 'button', tabindex: '0',
     title: item.name, onclick: onEdit,
   },
-    h('span', { class: 'glyph', html: IC[meta.icon] }),
+    markup('span', { class: 'glyph' }, IC[meta.icon]),
     h('span', { class: 'row-title' }, item.name),
     h('span', { class: 'res-switch', onclick: (e: Event) => e.stopPropagation() }, activeSwitch(item, onToggle)));
   row.addEventListener('keydown', (e: KeyboardEvent) => {
@@ -304,8 +304,8 @@ function buildResourceTab(agentId: string, kind: ResourceKind, viewMode: 'cards'
     h('div', { class: 'empty-note' }, 'Loading…'));
   const searchInput = buildSearchInput(meta);
   const seg = h('div', { class: 'seg' },
-    h('button', { title: 'List view', onclick: () => setMode('list') }, h('span', { html: IC.lines }), 'List'),
-    h('button', { title: 'Card view', onclick: () => setMode('cards') }, h('span', { html: IC.board }), 'Cards'));
+    h('button', { title: 'List view', onclick: () => setMode('list') }, markup('span', null, IC.lines), 'List'),
+    h('button', { title: 'Card view', onclick: () => setMode('cards') }, markup('span', null, IC.board), 'Cards'));
   syncSeg(seg, currentView);
   const toolbar = h('div', { class: 'res-toolbar' },
     searchInput,
@@ -543,7 +543,7 @@ export function agentDetailPage(agentId: string, initialTab: SubTab): HTMLElemen
     const agent = db.agents?.find(a => a.id === agentId) || null;
     head.append(
       h('div', { class: 'agent-detail-id' },
-        h('span', { class: 'agent-card-avatar', html: IC.bot }),
+        markup('span', { class: 'agent-card-avatar' }, IC.bot),
         h('div', { class: 'grow' },
           h('b', {}, nextView.name),
           h('span', { class: 'agent-card-detect ' + (nextView.detected ? 'on' : 'off') },

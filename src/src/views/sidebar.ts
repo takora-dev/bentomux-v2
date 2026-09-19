@@ -1,6 +1,6 @@
 /* ---------------- sidebar (nav + workspaces + one item per terminal pane) ---------------- */
 
-import { h, $, $$ } from '../dom';
+import { h, $, $$, markup } from '../dom';
 import { ic, IC } from '../icons';
 import { abs, rel } from '../time';
 import { ui, type Route, type TabEntry } from '../state';
@@ -122,7 +122,7 @@ function paneItem(row: PaneRow, pad: number, reveal: boolean = false): HTMLEleme
     onclick: () => activatePane(m.paneId, m.entry.id),
   },
     h('span', { class: 'workspace-row' },
-      h('span', { class: 'branch-icon', html: IC.git }),
+      markup('span', { class: 'branch-icon' }, IC.git),
       h('span', { class: 'workspace-copy' },
         h('span', { class: 'workspace-main' },
           h('span', { class: 'workspace-name' }, m.branch || m.workspaceName),
@@ -454,7 +454,7 @@ function workspaceFolder(ws: { id: string; name: string; path: string }, open: b
       toggleWorkspaceExpanded(ws.id, open);
     },
   },
-    h('span', { class: 'folder-icon', html: IC.folder }),
+    markup('span', { class: 'folder-icon' }, IC.folder),
     h('span', { class: 'folder-name' }, ws.name),
     workspaceMenuSpan(ws));
   row.addEventListener('pointerdown', e => startFolderPointerDrag(e, row, ws.id));
@@ -471,7 +471,7 @@ function workspaceMenuSpan(ws: { id: string; name: string; path: string }): HTML
     title: 'Workspace actions',
     'aria-label': 'Workspace actions',
     role: 'button',
-  }, h('span', { class: 'ws-menu-icon', html: IC.dots }));
+  }, markup('span', { class: 'ws-menu-icon' }, IC.dots));
   span.addEventListener('click', (e: Event) => {
     e.stopPropagation(); /* opening the menu must not also expand/collapse the folder */
     if (contextMenuAnchoredTo(span)) { closeContextMenu(); return; }

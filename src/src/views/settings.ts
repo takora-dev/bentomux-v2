@@ -2,7 +2,7 @@
    Opens as a modal with an internal menu; sections plug into SECTIONS below.
    Ships Appearance, Keybindings, Notifications, and Updates. */
 
-import { h } from '../dom';
+import { h, markup } from '../dom';
 import { currentModal, field, openModal } from '../components/modal';
 import { selectEl } from '../components/select';
 import { toggleSeg } from '../components/toggle';
@@ -95,7 +95,7 @@ function buildPaletteGrid(paint: () => void): HTMLElement {
         h('span', { style: 'background:' + accent }),
         h('span', { style: 'background:' + ink })),
       h('span', { class: 'palette-name' }, PALETTE_LABELS[p]),
-      h('span', { class: 'palette-check', html: '✓' }));
+      h('span', { class: 'palette-check' }, '✓'));
     grid.append(card);
   }
   return grid;

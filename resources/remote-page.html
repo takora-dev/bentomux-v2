@@ -101,12 +101,11 @@
       <button type="button" data-seq="&quot;\u001b[A&quot;">&#8593;</button>
       <button type="button" data-seq="&quot;\u001b[B&quot;">&#8595;</button>
     </div>
-    <div class="thint">Your token grants full terminal control — including typing — to anyone with this URL.</div>
+    <div class="thint">This session grants full terminal control — including typing — until the pairing cookie expires or you turn Remote off.</div>
   </div>
 </section>
 <script>
 'use strict';
-var token = new URLSearchParams(location.search).get('t') || '';
 var $ = function (id) { return document.getElementById(id); };
 
 var ws = null, retry = 0, connected = false;
@@ -143,7 +142,9 @@ function send(o) {
 
 function connect() {
   var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(proto + '//' + location.host + '/ws?t=' + encodeURIComponent(token));
+  /* the pairing token was already traded for an HttpOnly session cookie on
+     the redirect that brought us here; the socket presents that cookie */
+  ws = new WebSocket(proto + '//' + location.host + '/ws');
   ws.onopen = function () {
     retry = 0;
     setConn(true);

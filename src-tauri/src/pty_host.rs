@@ -419,11 +419,16 @@ fn handle_line(host: &Arc<Host>, line: &str) {
         "attach" => {
             let shared = host.terms.lock().unwrap().get(&id).map(|t| t.shared.clone());
             if let Some(shared) = shared {
-                shared.attached.store(true, Ordering::SeqCst);
+                /* Fresh xterm has no cursor/mode state from prior session.
+                   Reset before replay so alternate-screen and styling state
+                   cannot make the restored CLI look corrupted. */
                 let replay = shared.ring.lock().unwrap().replay();
                 if !replay.is_empty() {
+                    send_data(host, &shared.id, "\x1bc\x1b[0m\x1b[2J\x1b[H".as_bytes());
                     send_data(host, &shared.id, &replay);
                 }
+                /* Replay must arrive before live bytes. */
+                shared.attached.store(true, Ordering::SeqCst);
             }
         }
         "write" => {

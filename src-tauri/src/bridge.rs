@@ -388,6 +388,17 @@ fn live_socket(addr: &str) -> bool {
     std::os::unix::net::UnixStream::connect(addr).is_ok()
 }
 
+/* The socket sits in a world-writable temp dir. 0600 means only this user can
+   connect: anything that can talk to it can inject approval requests and
+   answer the ones an agent is blocked on. */
+#[cfg(unix)]
+fn restrict_socket(addr: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(addr, std::fs::Permissions::from_mode(0o600)) {
+        eprintln!("[bentomux] bridge socket chmod failed on {addr}: {e}");
+    }
+}
+
 #[cfg(unix)]
 pub fn start_bridge(app: tauri::AppHandle, pty: &PtyManager) {
     bridge_state().lock().unwrap().app = Some(app.clone());
@@ -425,6 +436,7 @@ pub fn start_bridge(app: tauri::AppHandle, pty: &PtyManager) {
             return;
         }
     };
+    restrict_socket(&addr);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             match stream {
@@ -573,6 +585,22 @@ mod tests {
         assert_eq!(json["hookSpecificOutput"]["decision"]["behavior"], "allow");
         stop_bridge();
     }
+    #[cfg(unix)]
+    #[test]
+    fn bridge_socket_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("bentomux-perm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let addr = path.to_string_lossy().into_owned();
+        restrict_socket(&addr);
+        let mode = std::fs::metadata(&addr).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "socket mode {:o}", mode);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_socket_connection_returns_resolved_directive() {

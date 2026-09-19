@@ -1,6 +1,6 @@
 /* ---------------- welcome page (shown when no workspaces exist) ---------------- */
 
-import { h } from '../dom';
+import { h, markup } from '../dom';
 import { addWorkspaceFlow } from './sidebar';
 
 const LOGO_SVG = `<svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -30,7 +30,7 @@ export function welcomePage(): HTMLElement {
 
   return h('div', { class: 'page welcome-page' },
     h('div', { class: 'welcome-inner' },
-      h('div', { class: 'welcome-logo', html: LOGO_SVG }),
+      markup('div', { class: 'welcome-logo' }, LOGO_SVG),
       h('h1', { class: 'welcome-title' }, 'Bentomux'),
       h('p', { class: 'welcome-sub' }, 'Calm desktop for AI agent workspaces'),
       h('div', { class: 'welcome-steps' }, steps),
