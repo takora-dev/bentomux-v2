@@ -12,6 +12,9 @@ import { openModal, currentModal } from '../components/modal';
 import { leavesOf, activate, tabTitle } from './tabs';
 import { primePaneFocus } from './terminal';
 import { openSettingsModal } from './settings';
+import { commandEntries } from '../plugin/registry';
+import { ensureActive } from '../plugin/loader';
+import { contributionLabel } from '../plugin/icons';
 
 interface SearchItem {
   kind: 'nav' | 'pane' | 'tab';
@@ -73,6 +76,24 @@ function buildSearchItems(): Section[] {
     });
   }
   if (tabItems.length) sections.push({ title: 'Tabs', items: tabItems });
+
+  /* plugin commands: declared in a manifest, so they appear in the palette
+     even before the plugin's code has been imported. Picking one activates
+     the plugin first (activation is lazy) and then runs the handler. */
+  const pluginItems: SearchItem[] = commandEntries().map(entry => ({
+    kind: 'nav' as const,
+    id: 'plugin:' + entry.contribution.id,
+    label: contributionLabel(entry.contribution),
+    sub: 'Plugin · ' + entry.pluginName,
+    icon: 'board' as keyof typeof IC,
+    onPick: () => {
+      void ensureActive(entry.pluginId).then(ok => {
+        if (ok) entry.run();
+        else console.warn(`[plugin:${entry.pluginId}] could not activate to run \`${entry.contribution.id}\``);
+      });
+    },
+  }));
+  if (pluginItems.length) sections.push({ title: 'Plugins', items: pluginItems });
 
   return sections;
 }

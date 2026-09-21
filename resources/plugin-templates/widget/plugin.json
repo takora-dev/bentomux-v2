@@ -1,0 +1,30 @@
+{
+  "id": "{{id}}",
+  "name": "{{name}}",
+  "version": "{{version}}",
+  "apiVersion": 1,
+  "description": "{{description}}",
+  "author": "{{author}}",
+  "entry": "index.js",
+  "icon": {
+    "type": "builtin",
+    "name": "board"
+  },
+  "permissions": [
+    "storage"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "id": "{{id}}.count",
+        "title": "{{name}}: Count a visit"
+      }
+    ],
+    "widgets": [
+      {
+        "id": "{{id}}.widget",
+        "title": "{{name}}"
+      }
+    ]
+  }
+}

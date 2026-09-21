@@ -16,6 +16,7 @@ pub mod bridge_config;
 pub mod commands;
 pub mod git;
 pub mod overlay;
+pub mod plugin;
 pub mod remote;
 pub mod runtime;
 use std::sync::Arc;
@@ -28,8 +29,26 @@ pub fn run() {
     // via builder.manage() — state is then available before WebView2
     // initialises, making the Windows "state not managed" boot error impossible.
     let app_state = state::AppStateManager::new(state::AppStateManager::pre_build_path());
+    /* safe mode is decided before the webview exists: if it engages, the
+       renderer must know from its very first paint so it can skip plugin
+       activation instead of racing the banner */
+    let boot_report = plugin::boot::begin_boot(&app_state, plugin::boot::requested_on_cli());
+    if boot_report.safe_mode {
+        eprintln!(
+            "[bentomux] safe mode: third-party plugins disabled (attempt {}, requested={})",
+            boot_report.attempts, boot_report.requested
+        );
+    }
+    app_state.patch_state(|s| {
+        s.safe_mode = boot_report.safe_mode;
+        s.boot_attempts = boot_report.attempts;
+    });
     let mut builder = tauri::Builder::default();
     builder = builder
+        /* plugin assets: `plugin://<id>/<path>` (see docs/adr/0003) */
+        .register_asynchronous_uri_scheme_protocol(plugin::scheme::SCHEME, |ctx, req, responder| {
+            plugin::scheme::handle(ctx, req, responder);
+        })
         /* must be the first plugin: a second launch has to bail out before it
            touches the store or the pty host daemon */
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -60,6 +79,36 @@ pub fn run() {
         runtime::init(handle.clone());
         /* approval bridge: unix socket the managed agent hooks write to */
         bridge::start_bridge(handle.clone(), &app.state::<pty::PtyManager>());
+        /* bundled plugins: install or refresh the ones shipped with this
+           build. Runs in setup so the resource dir can be resolved, and
+           before the renderer's first plugin_list, so the registry is
+           complete when the UI asks for it. */
+        {
+            let paths = plugin::registry::PluginPaths::new(
+                &app.path()
+                    .app_data_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            );
+            let bundled = app
+                .path()
+                .resolve(
+                    "../resources/plugin-bundled",
+                    tauri::path::BaseDirectory::Resource,
+                )
+                .ok()
+                .filter(|d| d.is_dir());
+            if let Some(dir) = bundled {
+                let paths = paths.with_bundled(dir);
+                let mgr = app.state::<state::AppStateManager>();
+                let mut errors = Vec::new();
+                mgr.patch_state(|s| {
+                    errors = plugin::registry::sync_bundled(&paths, &mut s.plugins);
+                });
+                for e in errors {
+                    eprintln!("[bentomux] bundled plugin sync: {}", e);
+                }
+            }
+        }
         /* track the last-known maximize state on the main window so we only
            emit `win:maximized` on the actual OS transition (mirrors
            Electron's `win.on('maximize'/'unmaximize')` pattern in
@@ -134,6 +183,30 @@ pub fn run() {
             commands::app_quit,
             commands::shutdown_for_update,
             commands::temp_write_file,
+            plugin::commands::plugin_list,
+            plugin::commands::plugin_choose_folder,
+            plugin::commands::plugin_choose_zip,
+            plugin::commands::plugin_choose_new_folder,
+            plugin::commands::plugin_templates,
+            plugin::commands::plugin_scaffold,
+            plugin::commands::plugin_skill_targets,
+            plugin::commands::plugin_install_skill,
+            plugin::commands::plugin_validate,
+            plugin::commands::plugin_manifest,
+            plugin::commands::plugin_install_folder,
+            plugin::commands::plugin_install_zip,
+            plugin::commands::plugin_install_url,
+            plugin::commands::plugin_set_enabled,
+            plugin::commands::plugin_update,
+            plugin::commands::plugin_rollback,
+            plugin::commands::plugin_uninstall,
+            plugin::commands::plugin_data_get,
+            plugin::commands::plugin_data_set,
+            plugin::commands::plugin_data_delete,
+            plugin::commands::plugin_data_keys,
+            plugin::commands::plugin_safe_mode,
+            plugin::commands::plugin_report_ready,
+            plugin::commands::plugin_leave_safe_mode,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

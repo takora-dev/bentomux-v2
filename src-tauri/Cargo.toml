@@ -46,6 +46,16 @@ regex = "1"
 # first tunnel use (39.8 MB -> 20.3 MB on darwin-x86_64); already in the tree via
 # tauri-plugin-updater's zip feature, so this adds no new crates
 flate2 = "1"
+# plugin install: zip/tar for archives, sha2 for the pinned digest,
+# reqwest for HTTPS installs. All already in the tree via
+# tauri-plugin-updater, so these add no new crates.
+zip = "4"
+sha2 = "0.10"
+semver = "1"
+# no `http2`: it pulls h2/quinn, which the existing lockfile does not carry.
+# Plugin downloads are single small zips; HTTP/1.1 is the right transport and
+# adding h2 would mean a lockfile-wide dependency bump for no benefit.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "blocking"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-opener = "2"

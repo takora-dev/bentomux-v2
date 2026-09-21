@@ -1,0 +1,17 @@
+# Generated plugin artifacts are compared byte-for-byte against freshly
+# generated output by `npm run plugin:skill:check` (CI runs it on every
+# platform, including windows-latest).
+#
+# The generators emit LF only: a JavaScript template literal normalises any
+# CRLF in its source to LF, and the reference files are built from those
+# literals. On a checkout that rewrites files to CRLF — git's
+# `core.autocrlf=true`, the default on GitHub's windows-latest runners — the
+# committed bytes disagree with the generated ones and the check reports drift
+# on files nobody edited. Pinning LF here keeps the worktree byte-identical to
+# what the generator produces, on every platform.
+#
+# `eol=lf` overrides `core.autocrlf`, so this holds however the checkout is
+# configured.
+resources/plugin-skill/** text eol=lf
+resources/plugin-templates/** text eol=lf
+resources/plugin-bundled/** text eol=lf

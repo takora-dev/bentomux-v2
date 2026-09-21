@@ -1,0 +1,21 @@
+{
+  "id": "{{id}}",
+  "name": "{{name}}",
+  "version": "{{version}}",
+  "apiVersion": 1,
+  "description": "{{description}}",
+  "author": "{{author}}",
+  "entry": "index.js",
+  "icon": {
+    "type": "builtin",
+    "name": "board"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "id": "{{id}}.hello",
+        "title": "{{name}}: Hello"
+      }
+    ]
+  }
+}

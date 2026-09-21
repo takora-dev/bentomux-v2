@@ -21,6 +21,7 @@ import type {
 } from '../../shared/types';
 import { db } from '../store';
 import { go } from '../router';
+import api from '../../preload/bentomux';
 
 type SubTab = 'model' | 'memory' | 'skills' | 'mcp';
 
@@ -90,7 +91,7 @@ export function agentsPage(): HTMLElement {
     grid.innerHTML = '';
     grid.append(h('div', { class: 'empty-note' }, 'Detecting…'));
     try {
-      const list = await window.bentomux.agents();
+      const list = await api.agents();
       grid.innerHTML = '';
       if (!list.length) {
         grid.append(h('div', { class: 'empty-note' }, 'No agents available.'));
@@ -149,7 +150,7 @@ function kindPayloadExtras(kind: ResourceKind, body: string, kindFields: MemoryF
 
 async function loadItemForEdit(kind: ResourceKind, id: string | undefined): Promise<ResourceItem | null> {
   if (!id) return null;
-  const items = await window.bentomux.listResources(kind);
+  const items = await api.listResources(kind);
   return items.find(x => x.id === id) || null;
 }
 
@@ -257,7 +258,7 @@ function buildModelTab(agentId: string, view: AgentConfigView, onApplied: (next:
     applyBtn.textContent = 'Applying…';
     applyBtn.setAttribute('disabled', '');
     try {
-      const next = await window.bentomux.setAgentModelSettings(agentId, patch);
+      const next = await api.setAgentModelSettings(agentId, patch);
       errLine.style.display = 'none';
       onApplied(next);
     } catch (e: unknown) {
@@ -386,7 +387,7 @@ function buildResourceTab(agentId: string, kind: ResourceKind, viewMode: 'cards'
       saveBtn.setAttribute('disabled', '');
       saveBtn.textContent = 'Saving…';
       try {
-        await window.bentomux.saveResource(payload);
+        await api.saveResource(payload);
         await reload();
         showList();
       } catch (e: unknown) {
@@ -408,7 +409,7 @@ function buildResourceTab(agentId: string, kind: ResourceKind, viewMode: 'cards'
       deleteBtn.setAttribute('disabled', '');
       deleteBtn.textContent = 'Deleting…';
       try {
-        await window.bentomux.deleteResource(kind, item.id);
+        await api.deleteResource(kind, item.id);
         await reload();
         showList();
       } catch (e: unknown) {
@@ -446,7 +447,7 @@ function buildResourceTab(agentId: string, kind: ResourceKind, viewMode: 'cards'
   /* ---- data load + actions shared by both views ---- */
   async function reload(): Promise<void> {
     try {
-      const raw = await window.bentomux.listResources(kind);
+      const raw = await api.listResources(kind);
       allItems = raw.filter(i => i.agentIds.includes(agentId));
     } catch (e) {
       console.error('list resources failed', e);
@@ -455,7 +456,7 @@ function buildResourceTab(agentId: string, kind: ResourceKind, viewMode: 'cards'
   }
 
   async function toggleItem(id: string, on: boolean): Promise<void> {
-    try { await window.bentomux.toggleResource(kind, id, on); }
+    try { await api.toggleResource(kind, id, on); }
     catch (e) { console.error('toggle resource failed', e); }
     await reload();
     if (mode === 'list') paintList();
@@ -556,7 +557,7 @@ export function agentDetailPage(agentId: string, initialTab: SubTab): HTMLElemen
 
   void (async () => {
     try {
-      const v = await window.bentomux.agentConfig(agentId);
+      const v = await api.agentConfig(agentId);
       if (!v) throw new Error('Agent not found: ' + agentId);
       view = v;
       paintHead(v);

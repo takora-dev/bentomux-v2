@@ -11,6 +11,7 @@ import { leafIds, leafNode } from '../../shared/split-tree';
 import type { AgentEventNotice } from '../../shared/types';
 import { activate } from './tabs';
 import { primePaneFocus } from './terminal';
+import api from '../../preload/bentomux';
 
 type TerminalEntry = TabEntry & { route: Extract<Route, { view: 'terminal' }> };
 const isTerminal = (t: TabEntry): t is TerminalEntry => t.route.view === 'terminal';
@@ -39,7 +40,7 @@ function jumpTo(paneId: string | null, cwd: string | null): void {
 }
 
 export function initAgentEvents(): void {
-  window.bentomux.onAgentEvent(notice => {
+  api.onAgentEvent(notice => {
     if (notice.kind === 'jump') jumpTo(notice.paneId, notice.cwd);
   });
 }

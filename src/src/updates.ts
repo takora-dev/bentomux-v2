@@ -6,7 +6,7 @@
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { getVersion } from '@tauri-apps/api/app';
-import { invoke } from '@tauri-apps/api/core';
+import { raw } from '../preload/bentomux';
 
 export type UpdatePhase =
   | 'idle'        // no check done yet
@@ -94,7 +94,7 @@ export async function installUpdate(): Promise<void> {
   set({ phase: 'downloading', progress: 0 });
   try {
     // Kill cloudflared.exe before installer overwrites it (Windows file-lock)
-    await invoke('shutdown_for_update').catch(() => {});
+    await raw.invoke('shutdown_for_update').catch(() => {});
     let downloaded = 0;
     let total = 0;
     await cachedUpdate.downloadAndInstall(event => {

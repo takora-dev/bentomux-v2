@@ -14,6 +14,7 @@ import { leafIds, type PaneNode } from '../../shared/split-tree';
 import type { FileDropEvent } from '../../shared/types';
 import { db } from '../store';
 import { splitTerminalPane, closeTerminalPane, setNodeDir } from './tabs';
+import api from '../../preload/bentomux';
 
 interface Live {
   id: string;
@@ -60,7 +61,7 @@ function quotePath(path: string): string {
 }
 
 function writePaths(tabId: string, paths: string[]): void {
-  window.bentomux.writeTab(tabId, paths.map(quotePath).join(' '));
+  api.writeTab(tabId, paths.map(quotePath).join(' '));
 }
 
 function cssVar(name: string): string {
@@ -122,7 +123,7 @@ export function initTerminalEvents(): void {
   parking = $('#termParking');
   window.addEventListener('focus', repaintTerminals);
   document.addEventListener('visibilitychange', repaintTerminals);
-  window.bentomux.onPtyData((id, chunk) => {
+  api.onPtyData((id, chunk) => {
     const live = lives.get(id);
 
     if (
@@ -136,12 +137,12 @@ export function initTerminalEvents(): void {
       bufferPending(id, chunk);
     }
   });
-  window.bentomux.onPtyExit((id, _code) => {
+  api.onPtyExit((id, _code) => {
     /* keep the dead shell visible until the user closes the pane/tab */
     const live = lives.get(id);
     if (live) live.term.write('\r\n\x1b[2m[process exited]\x1b[0m\r\n');
   });
-  window.bentomux.onFileDrop(handleFileDrop);
+  api.onFileDrop(handleFileDrop);
 }
 function createXterm(tabId: string): { term: Terminal; fit: FitAddon; host: HTMLElement } {
   const fontFamily = monoFont();
@@ -213,13 +214,13 @@ function wireXtermEvents(term: Terminal, tabId: string): void {
        path derives '\r' from the Enter charCode: block both, but write once. */
     if (e.shiftKey && e.key === 'Enter') {
       e.preventDefault();
-      if (e.type === 'keydown') window.bentomux.writeTab(tabId, '\n');
+      if (e.type === 'keydown') api.writeTab(tabId, '\n');
       return false;
     }
     return true;
   });
-  term.onData(d => window.bentomux.writeTab(tabId, d));
-  term.onResize(({ cols, rows }) => window.bentomux.resizeTab(tabId, cols, rows));
+  term.onData(d => api.writeTab(tabId, d));
+  term.onResize(({ cols, rows }) => api.resizeTab(tabId, cols, rows));
   wireClipboardPaste(term, tabId);
 }
 
@@ -251,7 +252,7 @@ function stageClipboardFile(file: File): Promise<string> {
     reader.onload = () => {
       const dataUrl = String(reader.result);
       const b64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
-      resolve(window.bentomux.saveTempFile(name, b64).catch(() => name));
+      resolve(api.saveTempFile(name, b64).catch(() => name));
     };
     reader.readAsDataURL(file);
   });

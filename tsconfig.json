@@ -11,5 +11,10 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/src/**/*.ts", "src/shared/**/*.ts", "src/preload/index.d.ts"]
+  "include": [
+    "src/src/**/*.ts",
+    "src/shared/**/*.ts",
+    "src/approval.ts",
+    "src/preload/**/*.ts"
+  ]
 }

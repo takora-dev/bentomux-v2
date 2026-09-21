@@ -11,6 +11,10 @@ import { resetPaneRatio } from './terminal';
 import { openContextMenu } from '../components/menu';
 import { openModal } from '../components/modal';
 import { refreshChangesPill } from './gitPanel';
+import { tabRenderer } from '../plugin/registry';
+import { ensureActive, pluginDisplayName } from '../plugin/loader';
+import { emitTabActivated, emitTabClosed } from '../main';
+import api from '../../preload/bentomux';
 
 const TAB_TITLE_MAX = 80;
 
@@ -22,6 +26,7 @@ export function tabKey(route: Route): string {
   if (route.view === 'terminal') return 'term:' + route.tabId;
   if (route.view === 'agentDetail') return 'agent:' + route.agentId + ':' + route.tab;
   if (route.view === 'diff') return 'diff:' + route.workspaceId + ':' + route.path;
+  if (route.view === 'plugin') return 'plugin:' + route.pluginId + ':' + route.tabId;
   return route.view;
 }
 
@@ -52,6 +57,7 @@ export function tabTitle(t: TabEntry): string {
     return name + ' · ' + cap;
   }
   if (route.view === 'diff') return diffTabTitle(route.path);
+  if (route.view === 'plugin') return t.title || route.title;
   return 'Agents';
 }
 
@@ -66,7 +72,7 @@ function syncActiveWorkspaceMarker(workspaceId: string | undefined): void {
   if (!workspaceId) return;
   if (db.activeWorkspaceId === workspaceId) return;
   db.activeWorkspaceId = workspaceId;
-  void window.bentomux.setActiveWorkspace(workspaceId);
+  void api.setActiveWorkspace(workspaceId);
   /* the titlebar Changes pill is keyed on the active workspace — re-fetch
      so +N -N reflects the newly-active folder without the user opening
      the Git panel */
@@ -85,20 +91,22 @@ function pushHistory(from: string, to: string): void {
 }
 
 export function setRoute(route: Route): void {
-  /* the titlebar tab strip holds terminals and diff pages; other resource
-     pages (agents, agentDetail) live as standalone pages and never become
-     a tab — we just update ui.route and re-render. */
-  if (route.view !== 'terminal' && route.view !== 'diff') {
+  /* the titlebar tab strip holds terminals, diff pages, and plugin tabs;
+     other resource pages (agents, agentDetail) live as standalone pages and
+     never become a tab — we just update ui.route and re-render. */
+  if (route.view !== 'terminal' && route.view !== 'diff' && route.view !== 'plugin') {
     if (ui.activeTab) pushHistory(ui.activeTab, '');
     ui.route = route;
-    window.bentomux.setActiveTab(null);
+    api.setActiveTab(null);
     render();
     return;
   }
   const key = tabKey(route);
   let t = ui.tabs.find(x => x.id === key);
   if (!t) {
-    const workspaceId = route.view === 'diff' ? route.workspaceId : findWorkspaceForTab(route.tabId);
+    const workspaceId = route.view === 'diff' ? route.workspaceId
+      : route.view === 'plugin' ? undefined
+      : findWorkspaceForTab(route.tabId);
     t = { id: key, route, workspaceId };
     ui.tabs.push(t);
   }
@@ -107,6 +115,20 @@ export function setRoute(route: Route): void {
     if (!activity[route.tabId]) activity[route.tabId] = Date.now();
   }
   activate(key);
+}
+
+/**
+ * Open a plugin-contributed tab.
+ *
+ * Plugin tabs are full citizens: grouped in the strip, part of back/forward
+ * history, and restored on restart. A tab whose plugin is no longer installed
+ * or enabled cannot be opened at all — the registry has no renderer for it —
+ * which is why this reports failure rather than opening an empty page.
+ */
+export function openPluginTab(pluginId: string, tabId: string, title: string): boolean {
+  if (!tabRenderer(pluginId, tabId)) return false;
+  setRoute({ view: 'plugin', pluginId, tabId, title });
+  return true;
 }
 
 function findWorkspaceForTab(tabId: string): string | undefined {
@@ -133,11 +155,12 @@ export function activate(id: string): void {
   syncActiveWorkspaceMarker(t.workspaceId);
   /* main tracks which pane's tab is on screen so the approval overlay
      stays hidden while the user is already looking at it */
-  window.bentomux.setActiveTab(t.route.view === 'terminal' ? t.route.tabId : null);
+  api.setActiveTab(t.route.view === 'terminal' ? t.route.tabId : null);
   /* switching to a terminal tab dismisses the Git Tools right-panel so the
      full content area is available for the shell; the panel can be
      re-opened from its titlebar pill regardless of route */
   if (t.route.view === 'terminal') { ui.gitPanelOpen = false; }
+  emitTabActivated(t.id);
   render();
 }
 
@@ -157,6 +180,7 @@ function dropIdsFrom(...lists: string[][]): string[][] {
 export async function closeTab(id: string): Promise<void> {
   const i = ui.tabs.findIndex(t => t.id === id);
   if (i < 0) return;
+  emitTabClosed(id);
   const t = ui.tabs[i];
   await shutdownTab(t);
   ui.tabs.splice(i, 1);
@@ -171,7 +195,7 @@ export async function closeTab(id: string): Promise<void> {
 async function shutdownTab(t: TabEntry): Promise<void> {
   const leaves = leavesOf(t);
   if (!leaves.length) return;
-  await window.bentomux.closeTab(leaves[0]); /* main removes the whole record */
+  await api.closeTab(leaves[0]); /* main removes the whole record */
   for (const id of leaves) {
     disposeTerminal(id);
     delete activity[id];
@@ -181,6 +205,7 @@ async function shutdownTab(t: TabEntry): Promise<void> {
 
 export async function closeOtherTabs(keepId: string): Promise<void> {
   const victims = ui.tabs.filter(t => t.id !== keepId);
+  for (const t of victims) emitTabClosed(t.id);
   for (const t of victims) await shutdownTab(t);
   const dead = new Set(victims.map(t => t.id));
   ui.tabs = ui.tabs.filter(t => !dead.has(t.id));
@@ -190,6 +215,7 @@ export async function closeOtherTabs(keepId: string): Promise<void> {
 }
 
 export async function closeAllTabs(): Promise<void> {
+  for (const t of [...ui.tabs]) emitTabClosed(t.id);
   for (const t of [...ui.tabs]) await shutdownTab(t);
   ui.tabs = [];
   ui.history = [];
@@ -267,7 +293,7 @@ function commitTitle(t: TabEntry, value: string): void {
   const name = value.trim().slice(0, TAB_TITLE_MAX);
   t.title = name || undefined;
   /* any pane id works — main resolves the owning record */
-  window.bentomux.renameTab(t.route.tabId, name);
+  api.renameTab(t.route.tabId, name);
   render();
 }
 
@@ -282,7 +308,7 @@ export async function newTerminalTab(wsId?: string): Promise<void> {
   const ws = db.workspaces.find(w => w.id === (wsId || db.activeWorkspaceId));
   if (!ws) return;
   try {
-    const rec = await window.bentomux.createTab(ws.id);
+    const rec = await api.createTab(ws.id);
     lastCreatedWs.set(rec.id, ws.id);
     activity[rec.id] = Date.now();
     setRoute({ view: 'terminal', tabId: rec.id });
@@ -322,7 +348,7 @@ export async function splitTerminalPane(paneId: string, dir: 'v' | 'h' = 'v'): P
   if (!entry || entry.route.view !== 'terminal') return;
   const key = newNodeKey();
   try {
-    const rec = await window.bentomux.splitTab(paneId, dir, key);
+    const rec = await api.splitTab(paneId, dir, key);
     const base = entry.tree ?? leafNode(entry.route.tabId);
     entry.tree = splitLeaf(base, paneId, dir, rec.id, key);
     activity[rec.id] = Date.now();
@@ -340,7 +366,7 @@ export function setNodeDir(nodeKey: string, dir: 'v' | 'h'): void {
   if (!entry || !entry.tree) return;
   entry.tree = setSplitDir(entry.tree, nodeKey, dir);
   resetPaneRatio(nodeKey);
-  window.bentomux.setSplitDir(nodeKey, dir);
+  api.setSplitDir(nodeKey, dir);
   render();
 }
 
@@ -352,7 +378,7 @@ export async function closeTerminalPane(paneId: string): Promise<void> {
   disposeTerminal(paneId);
   delete activity[paneId];
   lastCreatedWs.delete(paneId);
-  await window.bentomux.closePane(paneId);
+  await api.closePane(paneId);
   const tree = removeLeaf(before, paneId);
   if (!tree) {
     await closeTab(entry.id);
@@ -463,7 +489,7 @@ function reorderTab(draggedId: string, targetId: string, below: boolean): void {
   let index = 0;
   ui.tabs = ui.tabs.map(tab => tab.workspaceId === source.workspaceId
     ? tabs[index++] : tab);
-  void window.bentomux.reorderTabs(
+  void api.reorderTabs(
     ui.tabs
       .filter(tab => tab.route.view === 'terminal')
       .map(tab => tab.route.view === 'terminal' ? tab.route.tabId : ''),
@@ -473,10 +499,18 @@ function reorderTab(draggedId: string, targetId: string, below: boolean): void {
 
 function workspaceLabel(workspaceId: string | undefined): string {
   if (!workspaceId) return 'Other';
+  /* plugin tabs group under their plugin rather than under a workspace */
+  if (workspaceId.startsWith('plugin:')) {
+    const id = workspaceId.slice('plugin:'.length);
+    return pluginDisplayName(id);
+  }
   return db.workspaces.find(w => w.id === workspaceId)?.name || 'Workspace';
 }
 
 function tabWorkspaceKey(t: TabEntry): string {
+  /* plugin tabs belong to no workspace, so they group under their plugin's
+     name instead of landing in the catch-all bucket with unbound terminals */
+  if (t.route.view === 'plugin') return 'plugin:' + t.route.pluginId;
   return t.workspaceId || 'other';
 }
 
@@ -571,7 +605,9 @@ export function renderTabs(): void {
   strip.classList.add('tabstrip');
   $('#titlebar').classList.add('has-tabs');
   strip.innerHTML = '';
-  const visibleTabs = ui.tabs.filter(t => t.route.view === 'terminal' || t.route.view === 'diff');
+  const visibleTabs = ui.tabs.filter(
+    t => t.route.view === 'terminal' || t.route.view === 'diff' || t.route.view === 'plugin',
+  );
   const groups = new Map<string, TabEntry[]>();
   for (const tab of visibleTabs) {
     const key = tabWorkspaceKey(tab);
@@ -590,6 +626,8 @@ export function renderTabs(): void {
     group.append(...tabs.map(tabButton));
     strip.append(group);
   }
+  /* plugin tabs that are declared but not yet open appear in the add menu
+     rather than the strip, so the strip stays a record of what is open */
   if (ui.tabs.some(t => t.route.view === 'terminal')) strip.append(addTabButton());
 
   /* overflow strip scrolls horizontally instead of clipping tabs */

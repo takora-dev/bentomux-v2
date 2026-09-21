@@ -7,6 +7,7 @@ import { currentModal } from './components/modal';
 import { leavesOf, splitTerminalPane, stepHistory } from './views/tabs';
 import { mostRecentPane } from './views/terminal';
 import { openSearchModal } from './views/search';
+import api from '../preload/bentomux';
 
 /* app-level shortcuts; Settings › Keybindings overrides these by action id */
 /* use Cmd on macOS, Ctrl on Windows/Linux */
@@ -86,7 +87,7 @@ export function initKeyboard(): void {
     }
     if (e.metaKey && e.ctrlKey && e.key === 'f') {
       e.preventDefault();
-      void window.bentomux.toggleFullscreen();
+      void api.toggleFullscreen();
       return;
     }
 

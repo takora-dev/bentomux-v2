@@ -1,5 +1,4 @@
 import { Window } from '@tauri-apps/api/window';
-import './preload/bentomux';
 /* ============================================================
    Bentomux — calm desktop for AI agent runtime workspaces.
    Approval overlay page script (approval.html): the always-on-top pill
@@ -7,13 +6,13 @@ import './preload/bentomux';
    Port of the inline <script> from Electron's src/main/overlay.ts.
 
    The overlay has its OWN webview JS context, so it must import the IPC
-   bridge itself (side-effect installs `window.bentomux` here, exactly as
-   main.ts does for the main window). It then subscribes to the same
-   `agent:approval` and `agent:approvalClosed` events the Rust bridge
-   emits, and resolves/denies/jumps via the shared bridge methods.
+   bridge itself, exactly as main.ts does for the main window. It then
+   subscribes to the same `agent:approval` and `agent:approvalClosed`
+   events the Rust bridge emits, and resolves/denies/jumps via the
+   shared bridge methods.
    ============================================================ */
 
-import './preload/bentomux';
+import api from './preload/bentomux';
 
 /* two-tone chime; subject to prefs.notifSound (rendered via CSS class) —
    recreated to mirror Electron's Web Audio implementation */
@@ -93,26 +92,26 @@ function render(req: {
 }
 
 /* resolved elsewhere (native prompt answered, pane died, another surface) */
-window.bentomux.onAgentApprovalClosed(id => {
+api.onAgentApprovalClosed(id => {
   if (currentRequestId !== null && id === currentRequestId) {
-    void window.bentomux.hideApproval();
+    void api.hideApproval();
     window.close();
   }
 });
 
 /* any request that arrives renders the island; the bridge already filtered
    out the "main window focused & tab on screen" case. */
-window.bentomux.onAgentApproval(r => {
+api.onAgentApproval(r => {
   render(r);
 });
 /* A new WebView can miss the event emitted during creation. Replay the
    still-pending request so the message and request id are always populated. */
-void window.bentomux.approvalPending().then(req => {
+void api.approvalPending().then(req => {
   if (req && currentRequestId === null) render(req);
 }).catch(() => { /* overlay remains usable if the bridge is unavailable */ });
 
 /* apply the persisted theme immediately so the island matches the app */
-window.bentomux.getState()
+api.getState()
   .then((s: { prefs?: { theme?: string } }) => {
     applyTheme(s.prefs?.theme === 'dark');
     document.documentElement.classList.toggle('dark', s.prefs?.theme === 'dark');
@@ -121,23 +120,22 @@ window.bentomux.getState()
 
 $('#approve').addEventListener('click', () => {
   if (!currentRequestId) return;
-  void window.bentomux.resolveApproval(currentRequestId, 'allow')
-    .finally(() => { void window.bentomux.hideApproval(); });
+  void api.resolveApproval(currentRequestId, 'allow')
+    .finally(() => { void api.hideApproval(); });
 });
 $('#deny').addEventListener('click', () => {
   if (!currentRequestId) return;
-  void window.bentomux.resolveApproval(currentRequestId, 'deny')
-    .finally(() => { void window.bentomux.hideApproval(); });
+  void api.resolveApproval(currentRequestId, 'deny')
+    .finally(() => { void api.hideApproval(); });
 });
 $('#jump').addEventListener('click', () => {
   if (!currentRequestId) return;
-  void window.bentomux.hideApproval();
-  void window.bentomux.approvalJump(currentPaneId, currentCwd).catch(() => {});
+  void api.hideApproval();
+  void api.approvalJump(currentPaneId, currentCwd).catch(() => {});
   void (async () => {
     const main = new Window('main');
-    const { promise, resolve } = Promise.withResolvers<void>();
-    window.setTimeout(resolve, 30);
-    await promise;
+    /* let the OS register the window as visible before re-ordering it */
+    await new Promise<void>(resolve => window.setTimeout(resolve, 30));
     await main.setVisibleOnAllWorkspaces(true);
     await main.show();
     await main.unminimize();

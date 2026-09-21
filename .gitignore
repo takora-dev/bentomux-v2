@@ -18,3 +18,5 @@ out-test/
 resources/cloudflared/*/*
 resources/cloudflared/.prepared.json
 dist/
+.zcode
+pnpm-lock.yaml

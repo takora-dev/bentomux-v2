@@ -9,6 +9,29 @@ export type AgentId = string;
 import type { PaneNode } from './split-tree';
 export type { PaneNode } from './split-tree';
 
+/* plugin platform wire types. Defined next to the renderer's plugin host
+   (src/src/plugin/types.ts) because that module is also the SDK a plugin
+   author reads; re-exported here so the bridge and state shapes stay in one
+   contract file. The Rust mirror lives in src-tauri/src/plugin/mod.rs. */
+import type {
+  PluginManifest,
+  PluginRecord,
+  ValidationReport,
+} from '../src/plugin/types';
+export type {
+  PluginIcon,
+  Contribution,
+  Contributions,
+  ContributionKind,
+  PluginManifest,
+  PluginPermission,
+  PluginSource,
+  PluginRecord,
+  ValidationIssue,
+  ValidationReport,
+} from '../src/plugin/types';
+export { ALL_PERMISSIONS, CONTRIBUTION_KINDS, BACKEND_ALLOWLIST } from '../src/plugin/types';
+
 export interface WorkspaceRec {
   id: string;
   path: string;
@@ -85,6 +108,9 @@ export interface AppState {
      `agents:list` IPC so the sidebar/detail page can render without
      a separate fetch */
   agents: AgentInfo[];
+  /* installed plugins — the registry only. Plugin code lives under
+     app_data_dir/plugins/<id>/<version>/; see docs/PLUGIN_PLATFORM.md. */
+  plugins: PluginRecord[];
 }
 
 export interface Capabilities {
@@ -424,6 +450,9 @@ export interface BentomuxApi {
   onAgentApprovalClosed(cb: (requestId: string) => void): () => void;
   onAgentEvent(cb: (notice: AgentEventNotice) => void): () => void;
   resolveApproval(requestId: string, decision: 'allow' | 'deny'): void;
+  /* overlay-only: read the still-pending request, and dismiss the island */
+  approvalPending(): Promise<AgentApprovalRequest | null>;
+  hideApproval(): Promise<void>;
   /* focus Bentomux and jump to the requesting pane (overlay Jump button) */
   approvalJump(paneId: string | null, cwd: string | null): void;
   /* report the active terminal tab's anchor pane so the approval overlay
@@ -437,4 +466,33 @@ export interface BentomuxApi {
   remoteInfo(): Promise<RemotePairing>;
   remoteSetEnabled(on: boolean): Promise<RemotePairing>;
   remoteSetPort(port: number): Promise<RemotePairing>;
+
+  /* plugin platform (docs/PLUGIN_PLATFORM.md) */
+  pluginList(): Promise<PluginRecord[]>;
+  pluginChooseFolder(): Promise<string | null>;
+  pluginChooseZip(): Promise<string | null>;
+  pluginChooseNewFolder(): Promise<string | null>;
+  pluginTemplates(): Promise<{ name: string; contributes: string[] }[]>;
+  pluginSkillTargets(): Promise<{ agentId: string; agentName: string; path: string; installed: boolean }[]>;
+  pluginInstallSkill(agentId: string): Promise<string>;
+  pluginScaffold(p: {
+    template: string; dest: string; id: string; name: string;
+    version: string; description: string; author: string;
+  }): Promise<ValidationReport>;
+  pluginValidate(path: string, bundled?: boolean): Promise<ValidationReport>;
+  pluginManifest(id: string): Promise<PluginManifest>;
+  pluginInstallFolder(path: string): Promise<PluginRecord>;
+  pluginInstallZip(path: string): Promise<PluginRecord>;
+  pluginInstallUrl(url: string, sha256: string): Promise<PluginRecord>;
+  pluginSetEnabled(id: string, enabled: boolean): Promise<AppState>;
+  pluginUpdate(path: string): Promise<PluginRecord>;
+  pluginRollback(id: string): Promise<PluginRecord>;
+  pluginUninstall(id: string, removeData: boolean): Promise<AppState>;
+  pluginDataGet(id: string, key: string): Promise<unknown>;
+  pluginDataSet(id: string, key: string, value: unknown): Promise<void>;
+  pluginDataDelete(id: string, key: string): Promise<void>;
+  pluginDataKeys(id: string): Promise<string[]>;
+  pluginSafeMode(): Promise<{ safeMode: boolean; attempts: number; requested: boolean }>;
+  pluginReportReady(): Promise<void>;
+  pluginLeaveSafeMode(): Promise<void>;
 }
