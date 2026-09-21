@@ -347,7 +347,7 @@ function observe(container: HTMLElement, live: Live): void {
       live.term.refresh(0, Math.max(0, live.term.rows - 1));
       /* xterm does not emit resize when restored dimensions already match;
          still notify the persistent PTY so TUI apps redraw after reconnect. */
-      window.bentomux.resizeTab(live.id, live.term.cols, live.term.rows);
+      api.resizeTab(live.id, live.term.cols, live.term.rows);
     } catch {
       /* tiny container on first paint */
     }
