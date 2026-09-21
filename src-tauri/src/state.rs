@@ -10,9 +10,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use crate::plugin::PluginRecord;
 use crate::split_tree::{first_leaf_id, tree_from_legacy, Dir, PaneNode};
 
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 
 /* ---------------- shared type contract (src/shared/types.ts) ---------------- */
 
@@ -95,6 +96,9 @@ pub struct Prefs {
     pub remote: Option<RemotePrefs>,
     /* auto-update; absent = enabled */
     pub auto_update: Option<bool>,
+    /* consecutive boot attempts without a successful first paint. Drives the
+       automatic safe-mode entry (plugin::boot); 0 after any good boot. */
+    pub boot_attempts: Option<u32>,
 }
 
 impl Default for Prefs {
@@ -117,6 +121,7 @@ impl Default for Prefs {
             notif_sound: None,
             remote: None,
             auto_update: None,
+            boot_attempts: None,
         }
     }
 }
@@ -187,6 +192,18 @@ pub struct AppState {
     /* detected agent runtimes; populated on boot + on every agents:list
        command so the sidebar/detail page can render without a separate fetch */
     pub agents: Vec<AgentInfo>,
+    /* installed plugins. The registry only: plugin code lives under
+       app_data_dir/plugins/<id>/<version>/ and plugin data under
+       plugin-data/<id>.json, so this stays a small, diffable list. */
+    pub plugins: Vec<PluginRecord>,
+    /* session-only, never persisted: this boot is running with third-party
+       plugins disabled. `serde(skip)` keeps it out of bentomux.json — safe
+       mode is a fact about this session, not a saved preference. */
+    #[serde(skip)]
+    pub safe_mode: bool,
+    /* how many consecutive boot attempts led here, for the banner copy */
+    #[serde(skip)]
+    pub boot_attempts: u32,
 }
 
 impl Default for AppState {
@@ -199,6 +216,9 @@ impl Default for AppState {
             shadow: HashMap::new(),
             prefs: Prefs::default(),
             agents: vec![],
+            plugins: vec![],
+            safe_mode: false,
+            boot_attempts: 0,
         }
     }
 }
@@ -417,10 +437,12 @@ fn adopt(state: &mut AppState, raw: &serde_json::Value) {
     if raw.get("shadow").map(|v| v.is_null()).unwrap_or(true) {
         patched.shadow = HashMap::new();
     }
-    patched.version = raw
-        .get("version")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(VERSION as u64) as u32;
+    /* Stamp the CURRENT version, not the file's.
+       Adopting the old number meant every save wrote the old number back, so a
+       v3 store stayed "v3" forever and each boot re-ran the same adoption path.
+       The value is a migration marker: once this build has read the file, the
+       file is in this build's shape. */
+    patched.version = VERSION;
     *state = patched;
 }
 
@@ -472,7 +494,7 @@ mod tests {
         let path = temp_path("defaults");
         let mgr = AppStateManager::new(path.clone());
         let st = mgr.get_state();
-        assert_eq!(st.version, 5);
+        assert_eq!(st.version, 6);
         assert!(st.workspaces.is_empty());
         assert!(st.open_tabs.is_empty());
         assert_eq!(st.active_workspace_id, None);
@@ -481,6 +503,7 @@ mod tests {
         assert_eq!(st.prefs.pane_hidden, Some(false));
         assert_eq!(st.prefs.sidebar_width, Some(248.0));
         assert!(st.prefs.expanded.as_ref().unwrap().is_empty());
+        assert!(st.plugins.is_empty());
         cleanup(&path);
     }
 
@@ -645,6 +668,28 @@ mod tests {
         cleanup(&path);
     }
 
+    /* A store written by an older build must come back stamped with the
+       current version, or every save writes the old number back and the
+       migration path re-runs forever. */
+    #[test]
+    fn test_adopting_an_old_store_stamps_the_current_version() {
+        let path = temp_path("version-stamp");
+        fs::write(
+            &path,
+            serde_json::json!({ "version": 3, "workspaces": [] }).to_string(),
+        )
+        .unwrap();
+
+        let mgr = AppStateManager::new(path.clone());
+        assert_eq!(mgr.get_state().version, 6, "in memory");
+        /* and on disk, after any mutation */
+        mgr.patch_prefs(|p| p.theme = Some("dark".into()));
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["version"], 6, "persisted");
+        cleanup(&path);
+    }
+
     /* broken/missing files must not take the app down: defaults win */
     #[test]
     fn test_unreadable_file_falls_back_to_defaults() {
@@ -652,8 +697,28 @@ mod tests {
         fs::write(&path, "not json at all {{{").unwrap();
         let mgr = AppStateManager::new(path.clone());
         let st = mgr.get_state();
-        assert_eq!(st.version, 5);
+        assert_eq!(st.version, 6);
         assert!(st.workspaces.is_empty());
+        cleanup(&path);
+    }
+
+    /* v5 stores predate the plugin platform; they must adopt forward-only */
+    #[test]
+    fn test_v5_store_gains_an_empty_plugin_registry() {
+        let path = temp_path("v5-plugins");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "version": 5,
+                "workspaces": [{ "id": "w1", "path": "/x", "name": "x" }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mgr = AppStateManager::new(path.clone());
+        let st = mgr.get_state();
+        assert_eq!(st.workspaces.len(), 1, "user data survives the bump");
+        assert!(st.plugins.is_empty(), "the registry arrives empty, not missing");
         cleanup(&path);
     }
 

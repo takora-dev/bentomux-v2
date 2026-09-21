@@ -12,6 +12,7 @@ import { go } from '../router';
 import type {
   GitStatusResult, GitRemoteInfo, GitStatusEntry,
 } from '../../shared/types';
+import api from '../../preload/bentomux';
 
 interface PanelState {
   status: GitStatusResult | null;
@@ -136,7 +137,7 @@ async function refresh(state: PanelState, paint: () => void, opts: RefreshOpts =
       state.status = { isRepo: false, branch: null, ahead: 0, behind: 0, entries: [], hasUntracked: false };
       state.remote = { isRepo: false, remote: null, defaultBranch: null };
     } else {
-      const [s, r] = await Promise.all([window.bentomux.gitStatus(wsId), window.bentomux.gitRemoteInfo(wsId)]);
+      const [s, r] = await Promise.all([api.gitStatus(wsId), api.gitRemoteInfo(wsId)]);
       state.status = s;
       state.remote = r;
     }
@@ -171,7 +172,7 @@ export async function refreshChangesPill(): Promise<void> {
   const wsId = activeWsId();
   if (!wsId) { paintChangesPill(false, 0, 0); return; }
   try {
-    const ds = await window.bentomux.gitDiffStat(wsId);
+    const ds = await api.gitDiffStat(wsId);
     paintChangesPill(ds.isRepo, ds.additions, ds.deletions);
   } catch (e: unknown) {
     console.error('refreshChangesPill failed', e);

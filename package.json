@@ -17,7 +17,11 @@
     "test:release": "node scripts/release-manifest.mjs --selftest",
     "test:installer": "sh scripts/verify-installer.sh",
     "tauri": "tauri",
-    "tauri:dev": "node scripts/tauri-dev.mjs"
+    "tauri:dev": "node scripts/tauri-dev.mjs",
+    "plugin:templates": "node scripts/gen-plugin-templates.mjs",
+    "plugin:check": "node scripts/check-plugin-templates.mjs",
+    "plugin:skill": "node scripts/gen-plugin-skill.mjs",
+    "plugin:skill:check": "node scripts/gen-plugin-skill.mjs --check"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.0",

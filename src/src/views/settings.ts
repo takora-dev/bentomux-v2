@@ -16,6 +16,10 @@ import {
   type UpdatePhase,
 } from '../updates';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { settingsSectionEntries } from '../plugin/registry';
+import { contributionLabel } from '../plugin/icons';
+import { buildPluginsSection } from './pluginStudio';
+import api from '../../preload/bentomux';
 
 /* persist one pref key and run any immediate side effect; callers repaint
    the modal content afterwards */
@@ -23,7 +27,7 @@ function setPref<K extends keyof Prefs>(key: K, value: Prefs[K], apply?: () => v
   db.prefs[key] = value;
   const patch: Prefs = {};
   patch[key] = value;
-  void window.bentomux.setPrefs(patch);
+  void api.setPrefs(patch);
   apply?.();
 }
 
@@ -222,7 +226,7 @@ function startKeyCapture(action: KeyAction, chip: HTMLElement, paint: () => void
       return;
     }
     db.prefs.shortcuts = { ...(db.prefs.shortcuts || {}), [action.id]: accel };
-    void window.bentomux.setPrefs({ shortcuts: db.prefs.shortcuts });
+    void api.setPrefs({ shortcuts: db.prefs.shortcuts });
     paint();
   }
   function onOutside(e: PointerEvent): void {
@@ -265,11 +269,11 @@ function buildNotificationsSection(paint: () => void): HTMLElement {
   action.addEventListener('click', () => {
     if (!current) return;
     const next = current.installed
-      ? window.bentomux.agentHooksUninstall()
-      : window.bentomux.agentHooksInstall();
+      ? api.agentHooksUninstall()
+      : api.agentHooksInstall();
     void next.then(st => { current = st; paintStatus(); });
   });
-  void window.bentomux.agentHooksStatus().then(st => { current = st; paintStatus(); });
+  void api.agentHooksStatus().then(st => { current = st; paintStatus(); });
 
   return h('div', { class: 'settings-section' },
     field('Notifications', notifToggle('notifEnabled', paint)),
@@ -376,7 +380,7 @@ function buildSessionsSection(_paint: () => void): HTMLElement {
       h('button', {
         class: 'btn primary',
         type: 'button',
-        onclick: () => { void window.bentomux.quitApp(true); },
+        onclick: () => { void api.quitApp(true); },
       }, 'Stop and quit'),
     );
   };
@@ -402,16 +406,30 @@ const SECTIONS: SettingsSection[] = [
   { id: 'keys', label: 'Keybindings', icon: 'key', build: buildKeysSection },
   { id: 'notifications', label: 'Notifications', icon: 'bell', build: buildNotificationsSection },
   { id: 'sessions', label: 'Sessions', icon: 'term', build: buildSessionsSection },
+  { id: 'plugins', label: 'Plugins', icon: 'board', build: buildPluginsSection },
   { id: 'updates', label: 'Updates', icon: 'gear', build: buildUpdatesSection },
 ];
 
+/* Plugin-contributed settings sections are appended after the built-ins, so a
+   plugin can never displace a section the app itself depends on. */
+function allSections(): SettingsSection[] {
+  const contributed: SettingsSection[] = settingsSectionEntries().map(entry => ({
+    id: `plugin:${entry.contribution.id}`,
+    label: contributionLabel(entry.contribution),
+    icon: 'board' as keyof typeof IC,
+    build: entry.build,
+  }));
+  return [...SECTIONS, ...contributed];
+}
+
 export function openSettingsModal(): void {
   if (currentModal) return; /* one modal at a time — keyboard handler also guards */
-  let activeId = SECTIONS[0].id;
+  const sections = allSections();
+  let activeId = sections[0].id;
 
   const menuHost = h('div', { class: 'settings-menu' });
   const menuItems: Array<{ btn: HTMLElement; id: string }> = [];
-  for (const s of SECTIONS) {
+  for (const s of sections) {
     const btn = h('button', {
       class: 'nav-item',
       type: 'button',
@@ -423,7 +441,7 @@ export function openSettingsModal(): void {
 
   const contentHost = h('div', { class: 'settings-content' });
   function paint(): void {
-    const section = SECTIONS.find(s => s.id === activeId) ?? SECTIONS[0];
+    const section = sections.find(s => s.id === activeId) ?? sections[0];
     contentHost.innerHTML = '';
     contentHost.append(section.build(paint));
     for (const { btn, id } of menuItems) btn.classList.toggle('active', id === activeId);

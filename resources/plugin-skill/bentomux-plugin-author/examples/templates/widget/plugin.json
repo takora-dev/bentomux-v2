@@ -1,0 +1,30 @@
+{
+  "id": "acme.example",
+  "name": "Example Plugin",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "An example plugin, used as a reference by the authoring skill.",
+  "author": "Example Author",
+  "entry": "index.js",
+  "icon": {
+    "type": "builtin",
+    "name": "board"
+  },
+  "permissions": [
+    "storage"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "id": "acme.example.count",
+        "title": "Example Plugin: Count a visit"
+      }
+    ],
+    "widgets": [
+      {
+        "id": "acme.example.widget",
+        "title": "Example Plugin"
+      }
+    ]
+  }
+}

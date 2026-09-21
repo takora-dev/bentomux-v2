@@ -19,6 +19,10 @@ import { openSearchModal } from './search';
 import { openSettingsModal } from './settings';
 import { remoteDockButton } from './remote';
 import { gitPanelPage, refreshChangesPill } from './gitPanel';
+import { dockEntries, sidebarEntries } from '../plugin/registry';
+import { ensureActive, pluginAssetUrl } from '../plugin/loader';
+import { contributionIcon, contributionLabel } from '../plugin/icons';
+import api from '../../preload/bentomux';
 
 const PANE_INDENT = 24;
 
@@ -179,7 +183,7 @@ function finishPaneDrag(): void {
   if (sourceId && targetId && sourceId !== targetId) {
     const moved = ui.tabs.find(t => t.route.view === 'terminal' && leavesOf(t).includes(sourceId));
     if (reorderPane(sourceId, targetId, below) && moved) {
-      void window.bentomux.reorderTabs(
+      void api.reorderTabs(
         ui.tabs
           .filter(tab => tab.route.view === 'terminal')
           .map(tab => tab.route.view === 'terminal' ? tab.route.tabId : ''),
@@ -233,14 +237,14 @@ function endPaneDrag(e: PointerEvent): void {
 }
 
 export function addWorkspaceFlow(): void {
-  void window.bentomux.chooseFolder().then(async path => {
+  void api.chooseFolder().then(async path => {
     if (!path) return;
-    setDb(await window.bentomux.addWorkspace(path));
+    setDb(await api.addWorkspace(path));
     const added = findAddedWorkspace(path);
     if (!added) return;
-    branches.set(added.id, await window.bentomux.branchFor(added.path));
+    branches.set(added.id, await api.branchFor(added.path));
     db.prefs.expanded = { ...db.prefs.expanded, [added.id]: true };
-    void window.bentomux.setPrefs({ expanded: db.prefs.expanded });
+    void api.setPrefs({ expanded: db.prefs.expanded });
     renderSidebar();
   });
 }
@@ -251,7 +255,7 @@ function findAddedWorkspace(pickedPath: string) {
 }
 
 async function performRemoveWorkspace(wsId: string): Promise<void> {
-  setDb(await window.bentomux.removeWorkspace(wsId));
+  setDb(await api.removeWorkspace(wsId));
   /* drop local tab entries; main already killed the ptys */
   ui.tabs = ui.tabs.filter(t => !(t.route.view === 'terminal' && t.workspaceId === wsId));
   ui.history = ui.history.filter(id => ui.tabs.some(t => t.id === id));
@@ -330,6 +334,49 @@ function settingsGearButton(): HTMLElement {
   }, ic('gear'));
 }
 
+/* ---------------- plugin-contributed sidebar rows ----------------
+   A plugin row fires its declared command. The command's handler may live in
+   a plugin that has not been imported yet — plugin activation is lazy — so
+   the click activates first and runs after. */
+
+function pluginSidebarRows(): HTMLElement[] {
+  return sidebarEntries().map(entry => {
+    const icon = contributionIcon(entry.pluginId, entry.contribution, pluginAssetUrl);
+    const label = contributionLabel(entry.contribution);
+    return h('button', {
+      class: 'nav-item plugin-nav-item',
+      type: 'button',
+      title: `${label} — ${entry.pluginName}`,
+      dataset: { plugin: entry.pluginId, contribution: entry.contribution.id },
+      onclick: () => {
+        void ensureActive(entry.pluginId).then(ok => {
+          if (ok) entry.run();
+          else console.warn(`[plugin:${entry.pluginId}] could not activate to run \`${entry.contribution.id}\``);
+        });
+      },
+    }, icon ?? ic('board'), h('span', {}, label));
+  });
+}
+
+function pluginDockButtons(): HTMLElement[] {
+  return dockEntries().map(entry => {
+    const icon = contributionIcon(entry.pluginId, entry.contribution, pluginAssetUrl);
+    const label = contributionLabel(entry.contribution);
+    return h('button', {
+      class: 'iconbtn plugin-dock-item',
+      type: 'button',
+      title: `${label} — ${entry.pluginName}`,
+      'aria-label': label,
+      dataset: { plugin: entry.pluginId, contribution: entry.contribution.id },
+      onclick: () => {
+        void ensureActive(entry.pluginId).then(ok => {
+          if (ok) entry.run();
+        });
+      },
+    }, icon ?? ic('board'));
+  });
+}
+
 export function toggleGitPanel(): void {
   clearTerminalSelections();
   ui.gitPanelOpen = !ui.gitPanelOpen;
@@ -345,9 +392,9 @@ function workspaceLabelRow(): HTMLElement {
 
 function toggleWorkspaceExpanded(wsId: string, currentlyOpen: boolean): void {
   db.prefs.expanded = { ...(db.prefs.expanded || {}), [wsId]: !currentlyOpen };
-  void window.bentomux.setPrefs({ expanded: db.prefs.expanded });
+  void api.setPrefs({ expanded: db.prefs.expanded });
   db.activeWorkspaceId = wsId;
-  void window.bentomux.setActiveWorkspace(wsId);
+  void api.setActiveWorkspace(wsId);
   /* clicking a workspace folder also marks it active; re-fetch the titlebar
      Changes pill so +N -N matches the newly-active folder */
   void refreshChangesPill();
@@ -437,7 +484,7 @@ async function commitWorkspaceReorder(
   ids.splice(from, 1);
   const to = ids.indexOf(targetWsId);
   ids.splice(below ? to + 1 : to, 0, dragId);
-  setDb(await window.bentomux.reorderWorkspaces(ids));
+  setDb(await api.reorderWorkspaces(ids));
   renderSidebar();
 }
 
@@ -517,6 +564,13 @@ export function renderSidebar(): void {
 
   if (!db.workspaces.length) nav.append(h('div', { class: 'empty-note' }, 'Add a folder to begin'));
 
+  /* plugin rows sit after the workspace list and before the dock: they are
+     the user's own additions, so they read as a section of their own */
+  const pluginRows = pluginSidebarRows();
+  if (pluginRows.length) {
+    nav.append(h('div', { class: 'nav-label plugin-nav-label' }, 'Plugins'), ...pluginRows);
+  }
+
   renderBottomDock();
   renderGitPanel();
 }
@@ -528,7 +582,7 @@ function renderBottomDock(): void {
   const dock = $('#sidebarBottom');
   if (!dock) return;
   dock.innerHTML = '';
-  dock.append(settingsGearButton(), remoteDockButton());
+  dock.append(...pluginDockButtons(), settingsGearButton(), remoteDockButton());
 }
 
 function renderGitPanel(): void {

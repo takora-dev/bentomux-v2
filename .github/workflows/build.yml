@@ -69,6 +69,18 @@ jobs:
         shell: bash
         run: node scripts/release-manifest.mjs --selftest
 
+      # The plugin templates and the authoring skill are generated from the
+      # platform's own sources. A schema change that forgets either one would
+      # ship an agent knowledge that no longer matches the app, so both are
+      # re-generated here and compared.
+      - name: Check the plugin templates
+        shell: bash
+        run: npm run plugin:check
+
+      - name: Check the plugin authoring skill
+        shell: bash
+        run: npm run plugin:skill:check
+
       - name: Check the POSIX installer
         if: runner.os == 'Linux'
         shell: bash

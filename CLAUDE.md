@@ -31,6 +31,8 @@ harness that dies at load (STATUS_ENTRYPOINT_NOT_FOUND: the binary imports
 
 Bentomux is a desktop app for managing AI agent runtime workspaces. This repo (`Bentomux-v2/`) is a **Tauri 2 port** of the original Electron app at `../Bentomux/` — keep parity 1:1, do not redesign or add features. See `MIGRATION_TO_TAURI.md` (spec) and `AI_AGENT_PROMPT.md` (phase instructions).
 
+**One deliberate exception:** the plugin platform (`docs/PLUGIN_PLATFORM.md`) is a new feature and a new architecture layer, added alongside the existing UI rather than replacing it. It knowingly breaks the parity rule — see `docs/adr/0002-parity-rule-amended.md`. Do not "fix" it back to parity.
+
 ### Stack
 
 - **Frontend:** Vanilla TypeScript + Vite, xterm.js (`@xterm/xterm` + `addon-fit`/`addon-web-links`), Shiki for highlighting. No framework.

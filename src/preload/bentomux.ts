@@ -1,7 +1,13 @@
 /* ---------------- preload: typed bridge over Tauri IPC ----------------
    Port of src/preload/index.ts from the Electron build. Mirrors the
-   `BentomuxApi` shape 1:1 so existing renderer code (which references
-   `window.bentomux.*`) keeps working unchanged after the migration.
+   `BentomuxApi` shape 1:1 so existing renderer code keeps working
+   unchanged after the migration.
+
+   Deliberately NOT installed on `window`. Plugin code runs in this same
+   realm (docs/adr/0001-in-realm-plugin-execution.md), so a global handle
+   would hand every installed plugin the full command surface, bypassing
+   the permission-scoped `ctx` facade entirely. Renderer modules import
+   the default export instead.
 
    IPC mapping (Electron → Tauri v2):
      ipcRenderer.invoke(channel, ...args) → invoke<T>(cmd, { ...args })
@@ -45,6 +51,11 @@ import type {
   RuntimeStatus,
   TabRec,
 } from '../shared/types';
+import type {
+  PluginManifest,
+  PluginRecord,
+  ValidationReport,
+} from '../src/plugin/types';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -187,11 +198,54 @@ const api = {
   remoteInfo: () => invoke<RemotePairing>('remote_info'),
   remoteSetEnabled: (on: boolean) => invoke<RemotePairing>('remote_set_enabled', { on }),
   remoteSetPort: (port: number) => invoke<RemotePairing>('remote_set_port', { port }),
+
+  /* plugin platform (docs/PLUGIN_PLATFORM.md) */
+  pluginList: () => invoke<PluginRecord[]>('plugin_list'),
+  pluginChooseFolder: () => invoke<string | null>('plugin_choose_folder'),
+  pluginChooseZip: () => invoke<string | null>('plugin_choose_zip'),
+  pluginChooseNewFolder: () => invoke<string | null>('plugin_choose_new_folder'),
+  pluginTemplates: () => invoke<{ name: string; contributes: string[] }[]>('plugin_templates'),
+  pluginSkillTargets: () =>
+    invoke<{ agentId: string; agentName: string; path: string; installed: boolean }[]>('plugin_skill_targets'),
+  pluginInstallSkill: (agentId: string) =>
+    invoke<string>('plugin_install_skill', { agentId }),
+  pluginScaffold: (p: {
+    template: string; dest: string; id: string; name: string;
+    version: string; description: string; author: string;
+  }) => invoke<ValidationReport>('plugin_scaffold', p),
+  pluginValidate: (path: string, bundled?: boolean) =>
+    invoke<ValidationReport>('plugin_validate', { path, bundled }),
+  pluginManifest: (id: string) => invoke<PluginManifest>('plugin_manifest', { id }),
+  pluginInstallFolder: (path: string) => invoke<PluginRecord>('plugin_install_folder', { path }),
+  pluginInstallZip: (path: string) => invoke<PluginRecord>('plugin_install_zip', { path }),
+  pluginInstallUrl: (url: string, sha256: string) =>
+    invoke<PluginRecord>('plugin_install_url', { url, sha256 }),
+  pluginSetEnabled: (id: string, enabled: boolean) =>
+    invoke<AppState>('plugin_set_enabled', { id, enabled }),
+  pluginUpdate: (path: string) => invoke<PluginRecord>('plugin_update', { path }),
+  pluginRollback: (id: string) => invoke<PluginRecord>('plugin_rollback', { id }),
+  pluginUninstall: (id: string, removeData: boolean) =>
+    invoke<AppState>('plugin_uninstall', { id, removeData }),
+  pluginDataGet: (id: string, key: string) => invoke<unknown>('plugin_data_get', { id, key }),
+  pluginDataSet: (id: string, key: string, value: unknown) =>
+    invoke<void>('plugin_data_set', { id, key, value }),
+  pluginDataDelete: (id: string, key: string) => invoke<void>('plugin_data_delete', { id, key }),
+  pluginDataKeys: (id: string) => invoke<string[]>('plugin_data_keys', { id }),
+  pluginSafeMode: () =>
+    invoke<{ safeMode: boolean; attempts: number; requested: boolean }>('plugin_safe_mode'),
+  pluginReportReady: () => invoke<void>('plugin_report_ready'),
+  pluginLeaveSafeMode: () => invoke<void>('plugin_leave_safe_mode'),
 };
 
-/* install on the global window so renderer code can keep using
-   `window.bentomux.*` exactly as it did under Electron. */
-(window as unknown as { bentomux: typeof api }).bentomux = api;
+/* generic passthrough: the only command path that takes a command name as
+   data. Needed for `shutdown_for_update` (a lifecycle command that has no
+   place on the app-facing surface) and by the plugin host's allowlisted
+   `backend.invoke`. Callers outside the plugin host should prefer a named
+   method so the surface stays greppable. */
+const raw = {
+  invoke: <T = void>(cmd: string, args?: Record<string, unknown>) => invoke<T>(cmd, args),
+};
 
 export type BentomuxApiType = typeof api;
 export default api;
+export { raw };

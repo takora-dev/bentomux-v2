@@ -11,6 +11,7 @@ import { ui } from '../state';
 import type { GitFileDiff } from '../../shared/types';
 import { detectLang } from './highlight/lang';
 import { tokenize } from './highlight/tokenize';
+import api from '../../preload/bentomux';
 
 type LineKind = 'add' | 'del' | 'ctx' | 'hunk';
 
@@ -168,7 +169,7 @@ export function diffPage(workspaceId: string, filePath: string): HTMLElement {
 
   void (async () => {
     try {
-      const d = await window.bentomux.gitDiff(workspaceId, filePath);
+      const d = await api.gitDiff(workspaceId, filePath);
       slot.innerHTML = '';
       if (!d.isRepo) {
         slot.append(errorBody('Not a git repository.'));

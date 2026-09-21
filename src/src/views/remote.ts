@@ -12,6 +12,7 @@ import { h } from '../dom';
 import { field } from '../components/modal';
 import { ic } from '../icons';
 import type { RemotePairing } from '../../shared/types';
+import api from '../../preload/bentomux';
 
 let info: RemotePairing | null = null;
 let fetched = false;
@@ -29,7 +30,7 @@ function updateDockDot(): void {
 }
 
 async function refresh(): Promise<void> {
-  info = await window.bentomux.remoteInfo();
+  info = await api.remoteInfo();
   updateDockDot();
   if (panel) paintPanel();
 }
@@ -44,7 +45,7 @@ function pollTunnel(attempt = 0): void {
 
 async function applyEnabled(on: boolean): Promise<void> {
   try {
-    info = await window.bentomux.remoteSetEnabled(on);
+    info = await api.remoteSetEnabled(on);
   } catch (e) {
     if (info) info.error = e instanceof Error ? e.message : String(e);
   }
@@ -147,7 +148,7 @@ function paintPanel(): void {
     const portInput = h('input', { type: 'number', min: '1024', max: '65535', value: info.port }) as HTMLInputElement;
     portInput.addEventListener('change', () => {
       const p = parseInt(portInput.value, 10);
-      if (Number.isFinite(p)) void window.bentomux.remoteSetPort(p).then(next => { info = next; updateDockDot(); paintPanel(); });
+      if (Number.isFinite(p)) void api.remoteSetPort(p).then(next => { info = next; updateDockDot(); paintPanel(); });
     });
     body.append(field('Port', portInput));
 

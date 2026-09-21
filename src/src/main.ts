@@ -4,9 +4,6 @@
    ============================================================ */
 
 import '../styles.css';
-/* side-effect import: installs `window.bentomux` (the typed IPC bridge)
-   before any view module references it. */
-import '../preload/bentomux';
 import { $, $$, h } from './dom';
 import { rel, abs } from './time';
 import { ui, type Route, type TabEntry } from './state';
@@ -15,7 +12,7 @@ import { registerRenderers, render } from './render';
 import { renderTabs, activate, stepHistory, registerRestoredTab } from './views/tabs';
 import { addWorkspaceFlow, renderSidebar, toggleGitPanel } from './views/sidebar';
 import { agentsPage, agentDetailPage } from './views/agents';
-import { welcomePage } from './views/welcome';
+import { welcomePage, disposeWidgets } from './views/welcome';
 import {
   initTerminalEvents,
   terminalPage,
@@ -27,6 +24,12 @@ import { diffPage } from './views/diff';
 import { refreshChangesPill } from './views/gitPanel';
 import { initAgentEvents } from './views/agent-events';
 import { initAutoUpdate, updateStatus, onUpdateChange } from './updates';
+import { topbarEntries, tabRenderer, modalRenderer } from './plugin/registry';
+import { openPluginTab } from './views/tabs';
+import { openModal } from './components/modal';
+import { initPlugins, ensureActive, pluginAssetUrl, onPluginsChanged, bindHost, onTeardown } from './plugin/loader';
+import { contributionIcon, contributionLabel } from './plugin/icons';
+import api from '../preload/bentomux';
 document.documentElement.classList.toggle('macos', /Mac/.test(navigator.platform));
 
 /* Suppress native browser context menu everywhere except inside
@@ -108,9 +111,92 @@ function renderContentInner(route: Route): void {
     c.classList.add('fullbleed');
     body.innerHTML = '';
     body.append(diffPage(route.workspaceId, route.path));
+  } else if (route.view === 'plugin') {
+    /* a plugin tab renders into a host element it is given. The renderer is
+       looked up fresh each paint: the plugin may have been reloaded since the
+       tab was opened, and an updated renderer must win. */
+    body.innerHTML = '';
+    const render = tabRenderer(route.pluginId, route.tabId);
+    if (!render) {
+      /* the owning plugin is gone or disabled — a tab that cannot render
+         says so rather than showing an empty page */
+      body.append(h('div', { class: 'page' },
+        h('p', {}, `The plugin that provided this tab is no longer active.`)));
+    } else {
+      const host = h('div', { class: 'page plugin-tab-page' });
+      body.append(host);
+      void ensureActive(route.pluginId).then(() => {
+        const live = tabRenderer(route.pluginId, route.tabId);
+        if (!live) return;
+        try {
+          const cleanup = live(host);
+          if (typeof cleanup === 'function') registerPluginViewCleanup(route.pluginId, cleanup);
+        } catch (e) {
+          console.error(`[plugin:${route.pluginId}] tab \`${route.tabId}\` threw`, e);
+          host.textContent = 'This plugin tab failed to render.';
+        }
+      });
+    }
   } else {
     body.innerHTML = '';
     body.append(h('div', { class: 'page' }, h('p', {}, 'Unknown view.')));
+  }
+}
+
+/* Plugin view cleanups are keyed by plugin so a plugin that is disabled or
+   reloaded releases its mounted UI even while its tab stays open. */
+const pluginViewCleanups = new Map<string, Array<() => void>>();
+
+function registerPluginViewCleanup(pluginId: string, cleanup: () => void): void {
+  const list = pluginViewCleanups.get(pluginId) ?? [];
+  list.push(cleanup);
+  pluginViewCleanups.set(pluginId, list);
+}
+
+/**
+ * Render a plugin-declared modal into the app's own modal root.
+ *
+ * Uses the existing openModal so a plugin modal gets the same overlay, focus
+ * handling, and Escape behaviour as every built-in one — a plugin should not
+ * be able to produce a dialog that looks or behaves differently.
+ */
+export function openPluginModalInApp(pluginId: string, modalId: string, title: string): boolean {
+  const render = modalRenderer(pluginId, modalId);
+  if (!render) return false;
+  const host = h('div', { class: 'plugin-modal-body' });
+  const modal = openModal({ title, body: host });
+  try {
+    const cleanup = render(host);
+    if (typeof cleanup === 'function') {
+      modal.overlay.addEventListener('plugin:closed', () => cleanup(), { once: true });
+      /* openModal's own close removes the overlay; observe removal so the
+         cleanup runs however the modal was dismissed */
+      const observer = new MutationObserver(() => {
+        if (!document.body.contains(modal.overlay)) {
+          cleanup();
+          observer.disconnect();
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+    }
+  } catch (e) {
+    console.error(`[plugin:${pluginId}] modal \`${modalId}\` threw`, e);
+    host.textContent = 'This dialog failed to render.';
+  }
+  return true;
+}
+
+export function disposePluginViews(pluginId?: string): void {
+  const ids = pluginId ? [pluginId] : [...pluginViewCleanups.keys()];
+  for (const id of ids) {
+    for (const cleanup of pluginViewCleanups.get(id)?.splice(0) ?? []) {
+      try {
+        cleanup();
+      } catch (e) {
+        console.error(`[plugin:${id}] view cleanup threw`, e);
+      }
+    }
+    pluginViewCleanups.delete(id);
   }
 }
 
@@ -119,7 +205,7 @@ function renderContentInner(route: Route): void {
 function togglePaneHidden(): void {
   clearTerminalSelections();
   db.prefs.paneHidden = !(db.prefs.paneHidden === true);
-  void window.bentomux.setPrefs({ paneHidden: db.prefs.paneHidden });
+  void api.setPrefs({ paneHidden: db.prefs.paneHidden });
   document.body.classList.toggle('pane-hidden', db.prefs.paneHidden === true);
 }
 
@@ -152,7 +238,7 @@ export function resolveTheme(): 'light' | 'dark' {
 
 function toggleTheme(): void {
   db.prefs.theme = db.prefs.theme === 'dark' ? 'light' : 'dark';
-  void window.bentomux.setPrefs({ theme: db.prefs.theme });
+  void api.setPrefs({ theme: db.prefs.theme });
   document.documentElement.classList.toggle('dark', resolveTheme() === 'dark');
   render(); /* terminals re-theme in place */
 }
@@ -160,7 +246,7 @@ function toggleTheme(): void {
 export function setThemeMode(mode: 'light' | 'dark' | 'system'): void {
   if (db.prefs.theme === mode) return;
   db.prefs.theme = mode;
-  void window.bentomux.setPrefs({ theme: mode });
+  void api.setPrefs({ theme: mode });
   document.documentElement.classList.toggle('dark', resolveTheme() === 'dark');
   render();
 }
@@ -168,21 +254,21 @@ export function setThemeMode(mode: 'light' | 'dark' | 'system'): void {
 export function setPalette(palette: import('../shared/types').PaletteName): void {
   if (db.prefs.palette === palette) return;
   db.prefs.palette = palette;
-  void window.bentomux.setPrefs({ palette });
+  void api.setPrefs({ palette });
   applyPaletteClass(palette);
   render();
 }
 
 export function setTerminalFont(font: string | null | undefined): void {
   db.prefs.font = font === null ? undefined : (font || undefined);
-  void window.bentomux.setPrefs({ font: font === null ? null : db.prefs.font });
+  void api.setPrefs({ font: font === null ? null : db.prefs.font });
   applyFontPrefs();
   applyTerminalFont();
 }
 
 export function setTerminalFontSize(size: number | undefined): void {
   db.prefs.fontSize = size;
-  void window.bentomux.setPrefs({ fontSize: db.prefs.fontSize });
+  void api.setPrefs({ fontSize: db.prefs.fontSize });
   applyFontPrefs();
   applyTerminalFont();
 }
@@ -192,7 +278,7 @@ function wireTheme(): void {
 }
 
 function wireWindowControls(): void {
-  window.bentomux.onMaximized(max => {
+  api.onMaximized(max => {
     ui.maximized = max;
     document.body.classList.toggle('maximized', max);
   });
@@ -219,7 +305,7 @@ function wireSidebarResize(): void {
   resize.addEventListener('pointerup', () => {
     if (!resizing) return;
     resizing = false;
-    void window.bentomux.setPrefs({ sidebarWidth: db.prefs.sidebarWidth });
+    void api.setPrefs({ sidebarWidth: db.prefs.sidebarWidth });
     document.body.classList.remove('resizing-sidebar');
   });
 }
@@ -232,6 +318,90 @@ function wireAppBar(): void {
   wireWindowControls();
   wireSidebarResize();
   wireGitPill();
+  wirePluginTopbar();
+}
+
+/* ---------------- plugin host lifecycle events ----------------
+   The three events a plugin may subscribe to. They are derived from state the
+   app already tracks rather than from new backend emitters, so subscribing
+   costs nothing when no plugin is listening. */
+
+function subscribeHostEvent(event: string, cb: (payload: unknown) => void): () => void {
+  switch (event) {
+    case 'workspace:changed':
+      return api.onBranch((wsId, branch) => cb({ workspaceId: wsId, branch }));
+    case 'tab:activated':
+      return onTabActivated(cb);
+    case 'tab:closed':
+      return onTabClosed(cb);
+    default:
+      console.warn(`[plugin-host] unknown host event \`${event}\``);
+      return () => {};
+  }
+}
+
+const tabActivatedSubs = new Set<(payload: unknown) => void>();
+const tabClosedSubs = new Set<(payload: unknown) => void>();
+
+function onTabActivated(cb: (payload: unknown) => void): () => void {
+  tabActivatedSubs.add(cb);
+  return () => { tabActivatedSubs.delete(cb); };
+}
+
+function onTabClosed(cb: (payload: unknown) => void): () => void {
+  tabClosedSubs.add(cb);
+  return () => { tabClosedSubs.delete(cb); };
+}
+
+/** Called by the tab strip when the active tab changes. */
+export function emitTabActivated(tabId: string | null): void {
+  for (const cb of tabActivatedSubs) {
+    try {
+      cb({ tabId });
+    } catch (e) {
+      console.error('[plugin-host] tab:activated listener threw', e);
+    }
+  }
+}
+
+/** Called by the tab strip when a tab is removed. */
+export function emitTabClosed(tabId: string): void {
+  for (const cb of tabClosedSubs) {
+    try {
+      cb({ tabId });
+    } catch (e) {
+      console.error('[plugin-host] tab:closed listener threw', e);
+    }
+  }
+}
+
+/* ---------------- plugin-contributed topbar buttons ----------------
+   Rendered from the manifest alone, so a button appears even though the
+   plugin's code has not been imported. The click activates the plugin first
+   (lazy activation) and then runs the command. */
+
+function wirePluginTopbar(): void {
+  const host = document.getElementById('pluginTopbar');
+  if (!host) return;
+  host.innerHTML = '';
+  for (const entry of topbarEntries()) {
+    const icon = contributionIcon(entry.pluginId, entry.contribution, pluginAssetUrl);
+    const label = contributionLabel(entry.contribution);
+    const btn = h('button', {
+      class: 'tbtn plugin-topbar-btn',
+      type: 'button',
+      title: `${label} — ${entry.pluginName}`,
+      'aria-label': label,
+      dataset: { plugin: entry.pluginId, contribution: entry.contribution.id },
+      onclick: () => {
+        void ensureActive(entry.pluginId).then(ok => {
+          if (ok) entry.run();
+          else console.warn(`[plugin:${entry.pluginId}] could not activate to run \`${entry.contribution.id}\``);
+        });
+      },
+    }, icon ?? h('span', { class: 'plugin-topbar-label' }, label));
+    host.append(btn);
+  }
 }
 
 function wireGitPill(): void {
@@ -260,7 +430,7 @@ setInterval(() => {
 
 async function loadInitialBranches(): Promise<void> {
   await Promise.all(db.workspaces.map(async w => {
-    branches.set(w.id, await window.bentomux.branchFor(w.path));
+    branches.set(w.id, await api.branchFor(w.path));
   }));
 }
 
@@ -300,7 +470,7 @@ function notifyAgentTransition(id: string, state: string | null | undefined): vo
 
 
 function subscribeRuntime(): void {
-  window.bentomux.onRuntimeStatus(statuses => {
+  api.onRuntimeStatus(statuses => {
     for (const [id, st] of Object.entries(statuses)) {
       notifyAgentTransition(id, st.state);
       runtime[id] = st;
@@ -358,7 +528,26 @@ function wireUpdateBanner(): void {
 
 async function boot(): Promise<void> {
   const bootStart = performance.now();
-  setDb(await window.bentomux.getState());
+  setDb(await api.getState());
+
+  /* wire the plugin host before anything can activate a plugin: storage and
+     events need modules that import this one, so they are handed over rather
+     than imported from the loader */
+  bindHost({
+    storageGet: (id, key) => api.pluginDataGet(id, key),
+    storageSet: (id, key, value) => api.pluginDataSet(id, key, value),
+    storageDelete: (id, key) => api.pluginDataDelete(id, key),
+    storageKeys: id => api.pluginDataKeys(id),
+    hostEvent: (event, cb) => subscribeHostEvent(event, cb),
+    openTab: (pluginId, tabId, title) => openPluginTab(pluginId, tabId, title),
+    openModal: (pluginId, modalId, title) => openPluginModalInApp(pluginId, modalId, title),
+  });
+  /* a disabled or reloaded plugin must release the UI it mounted in the
+     shell, not just its registry entries */
+  onTeardown(pluginId => {
+    disposePluginViews(pluginId);
+    disposeWidgets();
+  });
 
   /* Sync dark class when OS theme changes and user is on 'system' */
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
@@ -370,7 +559,7 @@ async function boot(): Promise<void> {
 
   /* live subscriptions before anything renders */
   initTerminalEvents();
-  window.bentomux.onBranch((wsId, branch) => {
+  api.onBranch((wsId, branch) => {
     branches.set(wsId, branch);
     renderSidebar();
     renderTabs();
@@ -383,7 +572,7 @@ async function boot(): Promise<void> {
   initAgentEvents();
 
   /* restore last session's tabs as fresh shells */
-  const restored = await window.bentomux.restoreTabs();
+  const restored = await api.restoreTabs();
   for (const rec of restored) {
     registerRestoredTab(rec);
     activity[rec.id] = Date.now();
@@ -402,6 +591,27 @@ async function boot(): Promise<void> {
   restoreInitialView(restored);
   logSmokeIfRequested();
   console.info('[perf] renderer-boot-ms=' + Math.round(performance.now() - bootStart));
+
+  /* Plugins come last, and deliberately: their activation must not delay the
+     shell's first paint. Services start here too, once the window is
+     interactive (docs/PLUGIN_PLATFORM.md §2). A failure in this step is the
+     plugin host's problem, never the app's — boot has already succeeded. */
+  void initPlugins()
+    .then(() => {
+      /* a successful boot clears the safe-mode counter; if the app got this
+         far, the previous failures were not this session's */
+      return api.pluginReportReady();
+    })
+    .catch(e => console.error('[plugin-host] init failed', e));
+
+  /* surfaces that render plugin entries re-render when the registry changes:
+     activation is lazy, so a button's icon or a widget's body can appear
+     after the first paint */
+  onPluginsChanged(() => {
+    wirePluginTopbar();
+    renderSidebar();
+    if (ui.route.view === 'welcome') renderContentInner(ui.route);
+  });
 
   /* update check (after render so UI is not blocked) */
   wireUpdateBanner();

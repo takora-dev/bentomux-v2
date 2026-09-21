@@ -1,0 +1,125 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Bentomux plugin manifest",
+  "description": "The plugin.json every Bentomux plugin must carry. Generated documentation lives in resources/plugin-skill/; the enforcing code is src-tauri/src/plugin/mod.rs and validate.rs. This file is the single declaration those three are checked against.",
+  "type": "object",
+  "required": ["id", "name", "version", "apiVersion", "entry"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "publisher.name, exactly two segments of [a-z0-9-]+. The `bentomux` publisher is reserved for bundled plugins.",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"
+    },
+    "name": {
+      "type": "string",
+      "description": "Display name shown in Plugin Studio."
+    },
+    "version": {
+      "type": "string",
+      "description": "Semver. Also the on-disk version directory name.",
+      "pattern": "^\\d+\\.\\d+\\.\\d+"
+    },
+    "apiVersion": {
+      "type": "integer",
+      "const": 1,
+      "description": "Hard gate: the host refuses a major it does not implement."
+    },
+    "minAppVersion": {
+      "type": "string",
+      "description": "Soft gate: a mismatch warns, it does not refuse."
+    },
+    "description": {
+      "type": "string",
+      "description": "One line shown in the install review."
+    },
+    "author": {
+      "type": "string",
+      "description": "Who wrote the plugin."
+    },
+    "entry": {
+      "type": "string",
+      "description": "Path to the ES module entry, relative to the plugin root and inside it."
+    },
+    "icon": {
+      "description": "A builtin icon name or an image file inside the plugin folder. Inline markup is never accepted.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "name"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "builtin" },
+            "name": {
+              "type": "string",
+              "enum": ["lines", "plus", "git2", "chat", "chev", "board", "git", "folder", "bot", "search", "gear", "term", "key", "dots", "bell", "phone"]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "path"],
+          "additionalProperties": false,
+          "properties": {
+            "type": { "const": "image" },
+            "path": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "permissions": {
+      "type": "array",
+      "description": "Namespaces of the app the plugin may use. A contract, not a sandbox.",
+      "items": {
+        "type": "string",
+        "enum": [
+          "storage", "app.read", "app.prefs.write", "app.window", "files.temp",
+          "workspaces.write", "tabs.write", "terminal.read", "terminal.input",
+          "git.read", "git.push", "agents.read", "agents.write",
+          "remote.control", "backend.invoke"
+        ]
+      }
+    },
+    "contributes": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What the plugin adds. Declaring an id that is never registered is a warning; registering an undeclared id is an error.",
+      "properties": {
+        "commands": { "$ref": "#/definitions/contributionList" },
+        "topbar": { "$ref": "#/definitions/contributionList" },
+        "sidebar": { "$ref": "#/definitions/contributionList" },
+        "dock": { "$ref": "#/definitions/contributionList" },
+        "tabs": { "$ref": "#/definitions/contributionList" },
+        "modals": { "$ref": "#/definitions/contributionList" },
+        "widgets": { "$ref": "#/definitions/contributionList" },
+        "settings": { "$ref": "#/definitions/contributionList" },
+        "services": { "$ref": "#/definitions/contributionList" }
+      }
+    }
+  },
+  "definitions": {
+    "contributionList": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Must start with the plugin id, e.g. acme.my-plugin.open. Unique across every kind."
+          },
+          "title": {
+            "type": "string",
+            "description": "Label shown to the user. Falls back to the id's last segment."
+          },
+          "icon": { "$ref": "#/properties/icon" },
+          "command": {
+            "type": "string",
+            "description": "topbar / sidebar / dock only: the command id this entry fires. Must appear in contributes.commands."
+          }
+        }
+      }
+    }
+  }
+}
