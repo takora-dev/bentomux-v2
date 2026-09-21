@@ -501,7 +501,14 @@ if (CHECK) {
   for (const [rel, content] of Object.entries(all)) {
     const path = join(SKILL, rel);
     mkdirSync(join(path, '..'), { recursive: true });
-    writeFileSync(path, content);
+    /* Always LF, whatever the checkout uses. Some of this content is quoted
+     * straight out of src/src/plugin/types.ts and src-tauri/src/plugin/*.rs,
+     * so on a checkout with core.autocrlf=true the generated files would
+     * otherwise carry CRLF from those inputs while the template literals
+     * around them carry LF — mixed endings inside one file, and a diff that
+     * shows every line changed. `.gitattributes` pins these paths to LF; this
+     * makes the generator itself agree on every platform. */
+    writeFileSync(path, content.replace(/\r\n/g, '\n'));
   }
   console.log(`generated ${Object.keys(all).length} files into resources/plugin-skill/bentomux-plugin-author`);
 }
