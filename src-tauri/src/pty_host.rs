@@ -18,7 +18,7 @@
    (ponytail: JSON+base64 costs ~33% on the pty hot path; a binary framing is
    the upgrade path if a benchmark ever says the encode matters.) */
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde_json::{json, Value};
+use vt100::Parser;
 
 use crate::bridge_config::{bridge_env_for, instance_suffix};
 use crate::pty::{decode_pty_bytes, new_term_id};
@@ -40,11 +41,8 @@ pub const HOST_FLAG: &str = "--pty-host";
    daemon that answers with a different number: a daemon outlives app updates,
    so a silent mismatch would surface as confusing misbehaviour in the field
    with nothing to diagnose it. */
-pub const PROTOCOL_VERSION: u64 = 1;
+pub const PROTOCOL_VERSION: u64 = 2;
 
-/* bytes of scrollback kept per pane for replay on reattach. The renderer's
-   xterm holds 1000 lines; 1 MiB covers far more than a full repaint. */
-const RING_MAX: usize = 1 << 20;
 
 /* how long to wait for the freshly spawned daemon to accept a connection */
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
@@ -214,56 +212,6 @@ fn spawn_host_process() -> Result<(), String> {
     Ok(())
 }
 
-/* ---------------- replay ring ---------------- */
-
-struct Ring {
-    buf: VecDeque<u8>,
-    truncated: bool,
-}
-
-impl Ring {
-    fn new() -> Self {
-        Ring { buf: VecDeque::new(), truncated: false }
-    }
-
-    fn push(&mut self, bytes: &[u8]) {
-        if bytes.len() >= RING_MAX {
-            self.buf.clear();
-            self.buf.extend(&bytes[bytes.len() - RING_MAX..]);
-            self.truncated = true;
-            return;
-        }
-        let overflow = (self.buf.len() + bytes.len()).saturating_sub(RING_MAX);
-        if overflow > 0 {
-            self.buf.drain(..overflow);
-            self.truncated = true;
-        }
-        self.buf.extend(bytes);
-    }
-
-    fn replay(&self) -> Vec<u8> {
-        let mut out: Vec<u8> = self.buf.iter().copied().collect();
-        if self.truncated {
-            /* a full ring starts mid-stream, possibly inside an escape
-               sequence. Replay only the newest complete line: scanning from
-               the first newline can still expose the tail of a later OSC/CSI
-               sequence as printable text (for example the shell color table). */
-            let Some(last_nl) = out.iter().rposition(|&b| b == b'\n') else {
-                out.clear();
-                return out;
-            };
-            let end = last_nl + 1;
-            let start = out[..last_nl]
-                .iter()
-                .rposition(|&b| b == b'\n')
-                .map(|index| index + 1)
-                .unwrap_or(0);
-            out = out[start..end].to_vec();
-        }
-        out
-    }
-}
-
 /* ---------------- daemon state ---------------- */
 
 /* the hot path (pty reader thread) only ever touches this, never the term map */
@@ -273,7 +221,8 @@ struct TermShared {
     pid: u32,
     alive: AtomicBool,
     attached: AtomicBool,
-    ring: Mutex<Ring>,
+    stream_gate: Mutex<()>,
+    terminal: Mutex<Parser>,
 }
 
 struct HostTerm {
@@ -309,19 +258,17 @@ impl Host {
 
     /* become the active client; returns the generation to clear later */
     fn set_client(&self, tx: mpsc::Sender<String>) -> u64 {
-        let generation = {
-            let mut slot = self.client.lock().unwrap();
-            slot.generation += 1;
-            slot.tx = Some(tx);
-            slot.generation
-        };
-        /* a fresh client has not asked for any pane yet, so stop streaming:
-           otherwise live chunks arrive before the replay that `attach` sends
-           and land on the renderer out of order */
+        /* Stop every stream before publishing new client sender. Otherwise a
+           reader can enqueue live bytes into the new client between its
+           handshake and attach snapshot, corrupting restore ordering. */
         for term in self.terms.lock().unwrap().values() {
+            let _gate = term.shared.stream_gate.lock().unwrap();
             term.shared.attached.store(false, Ordering::SeqCst);
         }
-        generation
+        let mut slot = self.client.lock().unwrap();
+        slot.generation += 1;
+        slot.tx = Some(tx);
+        slot.generation
     }
 
     /* only the active client clears the slot: a superseded one must not */
@@ -419,15 +366,24 @@ fn handle_line(host: &Arc<Host>, line: &str) {
         "attach" => {
             let shared = host.terms.lock().unwrap().get(&id).map(|t| t.shared.clone());
             if let Some(shared) = shared {
-                /* Fresh xterm has no cursor/mode state from prior session.
-                   Reset before replay so alternate-screen and styling state
-                   cannot make the restored CLI look corrupted. */
-                let replay = shared.ring.lock().unwrap().replay();
-                if !replay.is_empty() {
-                    send_data(host, &shared.id, "\x1bc\x1b[0m\x1b[2J\x1b[H".as_bytes());
-                    send_data(host, &shared.id, &replay);
+                /* Serialize state replay with live output. Without this gate,
+                   two sender threads can enqueue live bytes before the state
+                   snapshot, corrupting xterm styles after reconnect. */
+                let _gate = shared.stream_gate.lock().unwrap();
+                let state = {
+                    let terminal = shared.terminal.lock().unwrap();
+                    let screen = terminal.screen();
+                    let mut state = if screen.alternate_screen() {
+                        b"\x1b[?1049h".to_vec()
+                    } else {
+                        b"\x1b[?1049l\x1b[3J".to_vec()
+                    };
+                    state.extend(screen.state_formatted());
+                    state
+                };
+                if !state.is_empty() {
+                    send_data(host, &shared.id, &state);
                 }
-                /* Replay must arrive before live bytes. */
                 shared.attached.store(true, Ordering::SeqCst);
             }
         }
@@ -445,6 +401,8 @@ fn handle_line(host: &Arc<Host>, line: &str) {
             let rows = msg.get("rows").and_then(Value::as_u64).unwrap_or(24) as u16;
             let terms = host.terms.lock().unwrap();
             if let Some(term) = terms.get(&id) {
+                let _gate = term.shared.stream_gate.lock().unwrap();
+                term.shared.terminal.lock().unwrap().set_size(rows, cols);
                 let _ = term.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
             }
         }
@@ -514,7 +472,8 @@ fn spawn_term(
         pid,
         alive: AtomicBool::new(true),
         attached: AtomicBool::new(false),
-        ring: Mutex::new(Ring::new()),
+        stream_gate: Mutex::new(()),
+        terminal: Mutex::new(Parser::new(24, 80, 1000)),
     });
 
     host.terms.lock().unwrap().insert(
@@ -540,8 +499,9 @@ fn spawn_term(
             match reader.read(&mut buf) {
                 Ok(0) => break, /* EOF: master closed */
                 Ok(n) => {
-                    shared_r.ring.lock().unwrap().push(&buf[..n]);
                     let chunk = decode_pty_bytes(&mut carry, &buf[..n]);
+                    let _gate = shared_r.stream_gate.lock().unwrap();
+                    shared_r.terminal.lock().unwrap().process(&buf[..n]);
                     if shared_r.attached.load(Ordering::SeqCst) {
                         if let Some(chunk) = chunk {
                             send_data(&host_r, &shared_r.id, chunk.as_bytes());
@@ -692,42 +652,6 @@ pub fn run_host() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ring_keeps_only_the_tail() {
-        let mut ring = Ring::new();
-        ring.push(&vec![b'a'; RING_MAX]);
-        ring.push(b"\nhead\ntail\n");
-        assert_eq!(ring.buf.len(), RING_MAX);
-        assert!(ring.truncated);
-        assert!(ring.replay().ends_with(b"tail\n"));
-    }
-
-    #[test]
-    fn replay_skips_partial_front_lines() {
-        let mut ring = Ring::new();
-        /* a chunk large enough to truncate, then a partial escape sequence and
-           a newer complete line */
-        ring.push(&vec![b'x'; RING_MAX]);
-        ring.push(b"\npartial-osc-payload\n\x1b[2JFRAME\n");
-        let replay = ring.replay();
-        assert!(replay.starts_with(b"\x1b[2JFRAME"), "replay: {:?}", String::from_utf8_lossy(&replay));
-    }
-
-    #[test]
-    fn truncated_replay_drops_incomplete_front_line() {
-        let mut ring = Ring::new();
-        ring.push(&vec![b'x'; RING_MAX]);
-        ring.push(b"partial-escape");
-        assert!(ring.replay().is_empty());
-    }
-
-    #[test]
-    fn untruncated_replay_is_byte_exact() {
-        let mut ring = Ring::new();
-        ring.push(b"\x1b]0;title\x07hello\n");
-        assert_eq!(ring.replay(), b"\x1b]0;title\x07hello\n");
-    }
 
     #[test]
     fn address_file_is_per_instance() {

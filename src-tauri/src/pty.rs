@@ -714,7 +714,7 @@ mod tests {
         assert!(info.alive, "pane must still be running");
         assert_eq!(info.pid, pid, "same process, not a respawn");
 
-        /* the replay carries the screen back */
+        /* the daemon sends a formatted terminal-state snapshot on attach */
         let mut data_rx = second.on_term_data();
         second.resize_term(&id, 100, 30).expect("resize");
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -786,7 +786,7 @@ mod tests {
             .collect();
         assert!(leaked.is_empty(), "streamed before attach: {leaked:?}");
 
-        /* after attach the replay arrives, and it carries the screen */
+        /* after attach the formatted terminal state arrives */
         second.attach(&id);
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut replay = String::new();

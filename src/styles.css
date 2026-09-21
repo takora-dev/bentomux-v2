@@ -757,11 +757,10 @@ html.drag-on, html.drag-on *{cursor:grabbing !important;user-select:none !import
 .mux-body.split .terminal-host{margin:var(--term-pad);padding:var(--term-pad-in);border:1px solid var(--line);border-radius:6px;box-sizing:content-box;transition:border-color .12s}
 .terminal-page .mux-body{position:relative;margin:0}
 .xterm,.xterm .xterm-viewport,.xterm .xterm-screen{border-radius:0}
-/* keep scrollback reachable via wheel/keys; the bar itself stays hidden.
-   xterm.css owns .xterm-viewport, so out-specify it here. */
-.xterm .xterm-viewport{overflow-y:hidden!important;scrollbar-width:none}
+/* Keep xterm's native viewport in charge of scrollback. Hiding overflow
+   leaves wheel/trackpad scrolling intact while avoiding a second scrollbar. */
+.xterm .xterm-viewport{overflow-y:scroll!important;scrollbar-width:none}
 .xterm .xterm-viewport::-webkit-scrollbar{display:none;width:0;height:0}
-.terminal-host *::-webkit-scrollbar{display:none;width:0;height:0}
 
 /* split view: recursive panes in one tab — 'v' axes side by side, 'h' stacked.
    Each pane renders as a bordered card; axes start at a 50/50 flex split. */
