@@ -774,12 +774,41 @@ pub fn shutdown_for_update(pty: State<'_, PtyManager>) {
    so copying the bytes out is the only way a pasted screenshot or file
    becomes something the shell/agent can actually open. The renderer sends
    the clipboard's own filename so the extension survives. */
+const CLIPBOARD_TEMP_PREFIX: &str = "bentomux-clipboard-";
+const CLIPBOARD_TEMP_MAX_AGE: std::time::Duration =
+    std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+pub fn cleanup_clipboard_temp_files() {
+    let temp_dir = std::env::temp_dir();
+    let cutoff = std::time::SystemTime::now().checked_sub(CLIPBOARD_TEMP_MAX_AGE);
+    let Ok(entries) = std::fs::read_dir(temp_dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_clipboard_file = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.starts_with(CLIPBOARD_TEMP_PREFIX))
+            .unwrap_or(false);
+        if !is_clipboard_file {
+            continue;
+        }
+        let old_enough = cutoff
+            .zip(entry.metadata().ok().and_then(|meta| meta.modified().ok()))
+            .map(|(cutoff, modified)| modified < cutoff)
+            .unwrap_or(false);
+        if old_enough {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 #[tauri::command]
 pub fn temp_write_file(name: String, data: String) -> Result<String, String> {
     use std::io::Write;
     let bytes = base64_decode(&data).map_err(|e| e.to_string())?;
     let path = std::env::temp_dir().join(format!(
-        "bentomux-{}-{}",
+        "{}{}-{}",
+        CLIPBOARD_TEMP_PREFIX,
         rand::random::<u32>(),
         safe_temp_name(&name)
     ));

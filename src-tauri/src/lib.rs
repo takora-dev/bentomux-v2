@@ -68,6 +68,7 @@ pub fn run() {
         use tauri::Emitter;
         use tauri::Manager;
         let handle = app.handle().clone();
+        commands::cleanup_clipboard_temp_files();
         let pty = pty::PtyManager::new(Some(handle.clone()));
         app.manage(pty);
         git::init_watch(handle.clone());
