@@ -462,6 +462,17 @@ const all = { ...files, ...examples };
 
 /* ---------------- check or write ---------------- */
 
+/* Compare text ignoring line-ending style. The generator emits LF, but the
+ * worktree may hold CRLF: git's `core.autocrlf=true` rewrites text files on
+ * checkout (it is the default on GitHub's windows-latest runners), and an
+ * editor can too. Line endings are never the drift this check exists to catch
+ * — a schema or API change is — so normalise before comparing rather than
+ * failing on a file nobody edited. `.gitattributes` pins these paths to LF so
+ * the committed bytes stay stable regardless; this is the belt to that braces. */
+function sameText(a, b) {
+  return a.replace(/\r\n/g, '\n') === b.replace(/\r\n/g, '\n');
+}
+
 if (CHECK) {
   const drift = [];
   for (const [rel, content] of Object.entries(all)) {
@@ -470,7 +481,7 @@ if (CHECK) {
       drift.push(`missing: ${rel}`);
       continue;
     }
-    if (readFileSync(path, 'utf8') !== content) drift.push(`out of date: ${rel}`);
+    if (!sameText(readFileSync(path, 'utf8'), content)) drift.push(`out of date: ${rel}`);
   }
   if (existsSync(SKILL)) {
     const onDisk = walk(SKILL);
