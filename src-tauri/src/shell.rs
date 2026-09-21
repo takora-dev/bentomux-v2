@@ -270,6 +270,11 @@ pub fn resolve_shell(pref: Option<&str>) -> ShellChoice {
             Some(found) => ShellChoice { file: found, args: vec![] },
             None => detect_shell(),
         },
+        #[cfg(unix)]
+        Some("pi") => match find_on_path("pi") {
+            Some(found) => ShellChoice { file: found, args: vec![] },
+            None => detect_shell(),
+        },
         /* platform-specific picks that don't exist on this OS (or unknown
            prefs entirely): fall back to the detected default rather than
            spawning a nonexistent binary */

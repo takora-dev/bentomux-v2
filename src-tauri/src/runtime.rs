@@ -539,11 +539,8 @@ pub fn init(app: tauri::AppHandle) {
         });
     }
 
-    /* feed the headless screen model from raw pty output */
-    let data_rx = app.state::<PtyManager>().on_term_data();
-    let exit_rx = app.state::<PtyManager>().on_term_exit();
-    screen::init_screen_feed(data_rx, exit_rx);
-
+    /* the PTY daemon owns the authoritative terminal parser and publishes
+       immutable snapshots; runtime only evaluates the cached snapshots. */
     /* per-tab runtime poller */
     std::thread::spawn(move || {
         let mut last_json = String::new();

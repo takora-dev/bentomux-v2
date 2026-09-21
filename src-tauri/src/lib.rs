@@ -8,6 +8,7 @@ pub mod split_tree;
 pub mod shell;
 pub mod pty;
 pub mod pty_host;
+pub mod terminal;
 pub mod detect;
 pub mod agents;
 pub mod agent_hooks;

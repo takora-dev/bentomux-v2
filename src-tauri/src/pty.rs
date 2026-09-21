@@ -221,7 +221,18 @@ impl PtyManager {
                             let _ = app.emit("pty:data", (id, chunk));
                         }
                     }
+                    "snapshot" => {
+                        let snapshot = crate::terminal::TerminalSnapshot {
+                            text: msg.get("text").and_then(Value::as_str).unwrap_or_default().to_string(),
+                            html: msg.get("html").and_then(Value::as_str).unwrap_or_default().to_string(),
+                            title: msg.get("title").and_then(Value::as_str).unwrap_or_default().to_string(),
+                            progress: msg.get("progress").and_then(Value::as_str).unwrap_or_default().to_string(),
+                            last_data_at: msg.get("lastDataAt").and_then(Value::as_u64).unwrap_or(0),
+                        };
+                        crate::detect::screen::update_snapshot(&id, snapshot);
+                    }
                     "exit" => {
+                        crate::detect::screen::clear_snapshot(&id);
                         let code = msg.get("code").and_then(Value::as_i64).unwrap_or(0) as i32;
                         if let Some(term) = terms.lock().unwrap().get_mut(&id) {
                             term.alive = false;
@@ -445,15 +456,13 @@ impl PtyManager {
         if !self.terms.lock().unwrap().contains_key(id) {
             return Ok(());
         }
-        /* keep the headless screen model (remote mirror) in step with the
-           real terminal so its column-position parsing doesn't drift */
-        crate::detect::screen::resize(id, cols, rows);
         self.send(json!({ "t": "resize", "id": id, "cols": cols, "rows": rows }))
     }
 
     pub fn kill_term(&self, id: &str) -> bool {
         let known = self.terms.lock().unwrap().remove(id).is_some();
         if known {
+            crate::detect::screen::clear_snapshot(id);
             let _ = self.send(json!({ "t": "kill", "id": id }));
         }
         known
@@ -731,6 +740,73 @@ mod tests {
         assert!(seen.contains("BENTOMUX_SURVIVOR"), "replay missing; saw {seen:?}");
 
         second.kill_term(&id);
+    }
+
+    #[test]
+    fn test_two_panes_survive_ten_reconnect_cycles() {
+        let (host, first) = test_manager("reconnect-10x");
+        let workspace = ws("reconnect-10x");
+        let shell_pref = if cfg!(windows) { Some("cmd") } else { Some("pi") };
+        let left = first.create_term(&workspace.id, &workspace.path, shell_pref).expect("left Pi spawn");
+        let right = first.create_term(&workspace.id, &workspace.path, shell_pref).expect("right Pi spawn");
+        let left_pid = first.get_term(&left).expect("left registered").pid;
+        let right_pid = first.get_term(&right).expect("right registered").pid;
+        let tree = crate::split_tree::split_leaf(
+            leaf_node(&left),
+            &left,
+            crate::split_tree::Dir::V,
+            &right,
+            "reconnect-10x",
+        );
+        let tab = TabRec {
+            id: left.clone(),
+            workspace_id: workspace.id.clone(),
+            split_tree: Some(tree),
+            title: Some("two pane reconnect".into()),
+        };
+
+        let mut current = Some(first);
+        for cycle in 0..10 {
+            drop(current.take());
+            let next = connect_test_manager(&host);
+            let restored = next.restore_terms(&[workspace.clone()], &[tab.clone()]);
+            assert_eq!(restored.len(), 1, "restore failed on cycle {cycle}");
+            let restored_tree = restored[0].split_tree.as_ref().expect("split preserved");
+            let leaves = crate::split_tree::leaf_ids(restored_tree);
+            assert_eq!(leaves.len(), 2, "pane count changed on cycle {cycle}");
+            assert!(leaves.contains(&left) && leaves.contains(&right), "pane ids changed on cycle {cycle}: {leaves:?}");
+            assert_eq!(next.get_term(&left).expect("left after restore").pid, left_pid);
+            assert_eq!(next.get_term(&right).expect("right after restore").pid, right_pid);
+
+            let mut data_rx = next.on_term_data();
+            let left_marker = format!("BENTOMUX_RECONNECT_LEFT_{cycle}");
+            let right_marker = format!("BENTOMUX_RECONNECT_RIGHT_{cycle}");
+            next.write_term(&left, &format!("echo {left_marker}\r\n")).expect("left write");
+            next.write_term(&right, &format!("echo {right_marker}\r\n")).expect("right write");
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut left_seen = false;
+            let mut right_seen = false;
+            while !(left_seen && right_seen) && std::time::Instant::now() < deadline {
+                match data_rx.try_recv() {
+                    Ok((id, chunk)) => {
+                        if id == left && chunk.contains(&left_marker) { left_seen = true; }
+                        if id == right && chunk.contains(&right_marker) { right_seen = true; }
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+                    Err(_) => break,
+                }
+            }
+            assert!(left_seen && right_seen, "markers missing on cycle {cycle}: left={left_seen}, right={right_seen}");
+            current = Some(next);
+        }
+
+        if let Some(last) = current {
+            assert!(last.kill_term(&left));
+            assert!(last.kill_term(&right));
+        }
     }
 
     #[test]

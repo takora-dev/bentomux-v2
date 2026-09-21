@@ -22,15 +22,14 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde_json::{json, Value};
-use vt100::Parser;
-
 use crate::bridge_config::{bridge_env_for, instance_suffix};
+use crate::terminal::TerminalModel;
 use crate::pty::{decode_pty_bytes, new_term_id};
 use crate::shell::resolve_shell;
 
@@ -41,7 +40,7 @@ pub const HOST_FLAG: &str = "--pty-host";
    daemon that answers with a different number: a daemon outlives app updates,
    so a silent mismatch would surface as confusing misbehaviour in the field
    with nothing to diagnose it. */
-pub const PROTOCOL_VERSION: u64 = 2;
+pub const PROTOCOL_VERSION: u64 = 3;
 
 
 /* how long to wait for the freshly spawned daemon to accept a connection */
@@ -49,6 +48,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 
 /* idle ticks (1s each) before a daemon with no live pane and no client exits */
 const IDLE_TICKS: u32 = 10;
+const SNAPSHOT_INTERVAL_MS: u64 = 250;
 
 /* ---------------- address ----------------
 
@@ -221,8 +221,9 @@ struct TermShared {
     pid: u32,
     alive: AtomicBool,
     attached: AtomicBool,
+    last_snapshot_at: AtomicU64,
     stream_gate: Mutex<()>,
-    terminal: Mutex<Parser>,
+    terminal: Mutex<TerminalModel>,
 }
 
 struct HostTerm {
@@ -284,6 +285,13 @@ impl Host {
     }
 }
 
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn b64(bytes: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -294,13 +302,17 @@ fn unb64(text: &str) -> Option<Vec<u8>> {
     base64::engine::general_purpose::STANDARD.decode(text).ok()
 }
 
-fn send_json(host: &Host, value: Value) {
-    let mut line = value.to_string();
-    line.push('\n');
+fn send_line(host: &Host, line: String) {
     let tx = host.client.lock().unwrap().tx.clone();
     if let Some(tx) = tx {
         let _ = tx.send(line); /* a dead client is noticed by the reader loop */
     }
+}
+
+fn send_json(host: &Host, value: Value) {
+    let mut line = value.to_string();
+    line.push('\n');
+    send_line(host, line);
 }
 
 fn reply(host: &Host, n: u64, mut value: Value) {
@@ -310,8 +322,22 @@ fn reply(host: &Host, n: u64, mut value: Value) {
     send_json(host, value);
 }
 
-fn send_data(host: &Host, id: &str, bytes: &[u8]) {
-    send_json(host, json!({ "t": "data", "id": id, "data": b64(bytes) }));
+fn encoded_data_line(id: &str, bytes: &[u8]) -> String {
+    let mut line = json!({ "t": "data", "id": id, "data": b64(bytes) }).to_string();
+    line.push('\n');
+    line
+}
+
+fn send_snapshot(host: &Host, id: &str, snapshot: &crate::terminal::TerminalSnapshot) {
+    send_json(host, json!({
+        "t": "snapshot",
+        "id": id,
+        "text": snapshot.text,
+        "html": snapshot.html,
+        "title": snapshot.title,
+        "progress": snapshot.progress,
+        "lastDataAt": snapshot.last_data_at,
+    }));
 }
 
 fn term_list(host: &Host) -> Value {
@@ -369,22 +395,25 @@ fn handle_line(host: &Arc<Host>, line: &str) {
                 /* Serialize state replay with live output. Without this gate,
                    two sender threads can enqueue live bytes before the state
                    snapshot, corrupting xterm styles after reconnect. */
-                let _gate = shared.stream_gate.lock().unwrap();
-                let state = {
-                    let terminal = shared.terminal.lock().unwrap();
-                    let screen = terminal.screen();
-                    let mut state = if screen.alternate_screen() {
-                        b"\x1b[?1049h".to_vec()
-                    } else {
-                        b"\x1b[?1049l\x1b[3J".to_vec()
-                    };
-                    state.extend(screen.state_formatted());
-                    state
-                };
-                if !state.is_empty() {
-                    send_data(host, &shared.id, &state);
+                /* Replay and the attached transition are one critical
+                   section. This prevents a reader from updating the parser
+                   after the replay snapshot but before `attached=true`, which
+                   would otherwise leave the renderer one chunk behind. */
+                {
+                    let _gate = shared.stream_gate.lock().unwrap();
+                    let state = shared.terminal.lock().unwrap().state_formatted();
+                    if !state.is_empty() {
+                        /* The line is prebuilt before enqueue; no socket write
+                           or blocking I/O happens while the gate is held. */
+                        send_line(host, encoded_data_line(&shared.id, &state));
+                    }
+                    shared.attached.store(true, Ordering::SeqCst);
                 }
-                shared.attached.store(true, Ordering::SeqCst);
+                /* Detection snapshot is independent of xterm replay ordering;
+                   render it after releasing the hot stream gate. */
+                let snapshot = shared.terminal.lock().unwrap().snapshot();
+                shared.last_snapshot_at.store(now_ms(), Ordering::Relaxed);
+                send_snapshot(host, &shared.id, &snapshot);
             }
         }
         "write" => {
@@ -401,9 +430,14 @@ fn handle_line(host: &Arc<Host>, line: &str) {
             let rows = msg.get("rows").and_then(Value::as_u64).unwrap_or(24) as u16;
             let terms = host.terms.lock().unwrap();
             if let Some(term) = terms.get(&id) {
-                let _gate = term.shared.stream_gate.lock().unwrap();
-                term.shared.terminal.lock().unwrap().set_size(rows, cols);
-                let _ = term.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+                {
+                    let _gate = term.shared.stream_gate.lock().unwrap();
+                    term.shared.terminal.lock().unwrap().set_size(rows, cols);
+                    let _ = term.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+                }
+                let snapshot = term.shared.terminal.lock().unwrap().snapshot();
+                term.shared.last_snapshot_at.store(now_ms(), Ordering::Relaxed);
+                send_snapshot(host, &term.shared.id, &snapshot);
             }
         }
         "kill" => {
@@ -472,8 +506,9 @@ fn spawn_term(
         pid,
         alive: AtomicBool::new(true),
         attached: AtomicBool::new(false),
+        last_snapshot_at: AtomicU64::new(0),
         stream_gate: Mutex::new(()),
-        terminal: Mutex::new(Parser::new(24, 80, 1000)),
+        terminal: Mutex::new(TerminalModel::default()),
     });
 
     host.terms.lock().unwrap().insert(
@@ -500,11 +535,38 @@ fn spawn_term(
                 Ok(0) => break, /* EOF: master closed */
                 Ok(n) => {
                     let chunk = decode_pty_bytes(&mut carry, &buf[..n]);
-                    let _gate = shared_r.stream_gate.lock().unwrap();
-                    shared_r.terminal.lock().unwrap().process(&buf[..n]);
-                    if shared_r.attached.load(Ordering::SeqCst) {
-                        if let Some(chunk) = chunk {
-                            send_data(&host_r, &shared_r.id, chunk.as_bytes());
+                    /* Base64/JSON work happens before the gate. Inside it we
+                       only process the parser and enqueue an already-built
+                       line, keeping the hot critical section bounded. */
+                    let encoded_chunk = chunk
+                        .as_deref()
+                        .map(|text| encoded_data_line(&shared_r.id, text.as_bytes()));
+                    let attached = {
+                        let _gate = shared_r.stream_gate.lock().unwrap();
+                        shared_r.terminal.lock().unwrap().process(&buf[..n]);
+                        if shared_r.attached.load(Ordering::SeqCst) {
+                            if let Some(line) = encoded_chunk {
+                                send_line(&host_r, line);
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if attached {
+                        let now = now_ms();
+                        let previous = shared_r.last_snapshot_at.load(Ordering::Relaxed);
+                        if now.saturating_sub(previous) >= SNAPSHOT_INTERVAL_MS
+                            && shared_r
+                                .last_snapshot_at
+                                .compare_exchange(previous, now, Ordering::Relaxed, Ordering::Relaxed)
+                                .is_ok()
+                        {
+                            /* Full text+HTML rendering is intentionally
+                               coalesced. Raw bytes remain realtime; runtime
+                               and remote already tick at 250 ms. */
+                            let snapshot = shared_r.terminal.lock().unwrap().snapshot();
+                            send_snapshot(&host_r, &shared_r.id, &snapshot);
                         }
                     }
                 }
