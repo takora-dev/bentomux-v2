@@ -207,8 +207,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # the annotated tag message is the release body: --generate-notes
-          # would throw it away and publish a bare changelog link
-          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
+          # would throw it away and publish a bare changelog link.
+          # `%(contents:body)` and not `%(contents)`: a signed tag carries its
+          # PGP block inside the tag object, and `%(contents)` includes it, so
+          # the published notes would end with a wall of base64.
+          git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
           find "$BUNDLE_DIR" -type f \( \
