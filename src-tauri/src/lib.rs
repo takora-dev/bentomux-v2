@@ -166,6 +166,8 @@ pub fn run() {
             commands::git_diff_stat,
             commands::git_push,
             commands::git_remote_info,
+            commands::git_history,
+            commands::git_show,
             commands::git_branch_for,
             commands::agents_list,
             commands::agents_config,

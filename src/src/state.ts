@@ -8,6 +8,8 @@ export type Route =
   | { view: 'agents' }
   | { view: 'agentDetail'; agentId: string; tab: 'model' | 'memory' | 'skills' | 'mcp' }
   | { view: 'diff'; workspaceId: string; path: string }
+  /* one commit's detail page, opened by clicking a row in the commit graph */
+  | { view: 'commit'; workspaceId: string; oid: string; short: string }
   /* a tab contributed by a plugin. `tabId` is the contribution id the
      manifest declared; the body comes from the plugin's own renderer. */
   | { view: 'plugin'; pluginId: string; tabId: string; title: string };

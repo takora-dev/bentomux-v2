@@ -21,6 +21,7 @@ import {
 } from './views/terminal';
 import { initKeyboard } from './keyboard';
 import { diffPage } from './views/diff';
+import { commitPage } from './views/commit';
 import { refreshChangesPill } from './views/gitPanel';
 import { initAgentEvents } from './views/agent-events';
 import { initAutoUpdate, updateStatus, onUpdateChange } from './updates';
@@ -111,6 +112,10 @@ function renderContentInner(route: Route): void {
     c.classList.add('fullbleed');
     body.innerHTML = '';
     body.append(diffPage(route.workspaceId, route.path));
+  } else if (route.view === 'commit') {
+    c.classList.add('fullbleed');
+    body.innerHTML = '';
+    body.append(commitPage(route.workspaceId, route.oid, route.short));
   } else if (route.view === 'plugin') {
     /* a plugin tab renders into a host element it is given. The renderer is
        looked up fresh each paint: the plugin may have been reloaded since the
@@ -416,7 +421,11 @@ registerRenderers({ root: renderRoot, content: renderContentInner, sidebar: rend
 
 /* poll Changes pill every 5 s so +N -N stays accurate as files change,
    even when the git panel is closed */
-setInterval(() => { void refreshChangesPill(); }, 5000);
+setInterval(() => {
+  /* while the panel is open its own 4s poll already repaints the pill, so
+     polling here too would race two git processes at the same numstat */
+  if (!ui.gitPanelOpen) void refreshChangesPill();
+}, 5000);
 
 setInterval(() => {
   $$('[data-ts]').forEach(el => {

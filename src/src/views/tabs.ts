@@ -26,6 +26,7 @@ export function tabKey(route: Route): string {
   if (route.view === 'terminal') return 'term:' + route.tabId;
   if (route.view === 'agentDetail') return 'agent:' + route.agentId + ':' + route.tab;
   if (route.view === 'diff') return 'diff:' + route.workspaceId + ':' + route.path;
+  if (route.view === 'commit') return 'commit:' + route.workspaceId + ':' + route.oid;
   if (route.view === 'plugin') return 'plugin:' + route.pluginId + ':' + route.tabId;
   return route.view;
 }
@@ -57,6 +58,7 @@ export function tabTitle(t: TabEntry): string {
     return name + ' · ' + cap;
   }
   if (route.view === 'diff') return diffTabTitle(route.path);
+  if (route.view === 'commit') return route.short;
   if (route.view === 'plugin') return t.title || route.title;
   return 'Agents';
 }
@@ -94,7 +96,7 @@ export function setRoute(route: Route): void {
   /* the titlebar tab strip holds terminals, diff pages, and plugin tabs;
      other resource pages (agents, agentDetail) live as standalone pages and
      never become a tab — we just update ui.route and re-render. */
-  if (route.view !== 'terminal' && route.view !== 'diff' && route.view !== 'plugin') {
+  if (route.view !== 'terminal' && route.view !== 'diff' && route.view !== 'plugin' && route.view !== 'commit') {
     if (ui.activeTab) pushHistory(ui.activeTab, '');
     ui.route = route;
     api.setActiveTab(null);
@@ -105,6 +107,7 @@ export function setRoute(route: Route): void {
   let t = ui.tabs.find(x => x.id === key);
   if (!t) {
     const workspaceId = route.view === 'diff' ? route.workspaceId
+      : route.view === 'commit' ? route.workspaceId
       : route.view === 'plugin' ? undefined
       : findWorkspaceForTab(route.tabId);
     t = { id: key, route, workspaceId };
@@ -516,12 +519,15 @@ function tabWorkspaceKey(t: TabEntry): string {
 
 function tabButton(t: TabEntry): HTMLElement {
   const title = tabTitle(t);
-  /* diff tabs carry the repo-relative file path in their route — surface it
-     in the tooltip so same-named files from different folders are told apart */
+  /* diff and commit tabs carry a repo-relative path or a sha in their route —
+     surface it in the tooltip so same-named files from different folders are
+     told apart */
   const tooltip = t.route.view === 'diff'
     ? t.route.path
-    : [workspaceLabel(t.workspaceId), title, t.title ?
-      'Double-click to rename' : ''].filter(Boolean).join('\n');
+    : t.route.view === 'commit'
+      ? t.route.oid
+      : [workspaceLabel(t.workspaceId), title, t.title ?
+        'Double-click to rename' : ''].filter(Boolean).join('\n');
   return h('button',
     {
       class: 'tab' + (t.id === ui.activeTab ? ' active' : ''),
@@ -606,7 +612,8 @@ export function renderTabs(): void {
   $('#titlebar').classList.add('has-tabs');
   strip.innerHTML = '';
   const visibleTabs = ui.tabs.filter(
-    t => t.route.view === 'terminal' || t.route.view === 'diff' || t.route.view === 'plugin',
+    t => t.route.view === 'terminal' || t.route.view === 'diff'
+      || t.route.view === 'commit' || t.route.view === 'plugin',
   );
   const groups = new Map<string, TabEntry[]>();
   for (const tab of visibleTabs) {

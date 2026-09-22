@@ -41,6 +41,8 @@ import type {
   GitDiffResult,
   GitDiffStatResult,
   GitRemoteInfo,
+  GitHistoryResult,
+  GitCommitDetail,
   GitStatusResult,
   ModelSettingsPatch,
   Prefs,
@@ -178,6 +180,8 @@ const api = {
   gitPush: (workspaceId: string, setUpstream: boolean) =>
     invoke<GitCommandResult>('git_push', { workspaceId, setUpstream }),
   gitRemoteInfo: (workspaceId: string) => invoke<GitRemoteInfo>('git_remote_info', { workspaceId }),
+  gitHistory: (workspaceId: string) => invoke<GitHistoryResult>('git_history', { workspaceId }),
+  gitShow: (workspaceId: string, oid: string) => invoke<GitCommitDetail>('git_show', { workspaceId, oid }),
 
   /* agents & resources */
   agents: () => invoke<AgentInfo[]>('agents_list'),

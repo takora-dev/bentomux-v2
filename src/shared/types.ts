@@ -286,6 +286,59 @@ export interface GitRemoteInfo {
   defaultBranch: string | null;
 }
 
+/** A branch, remote-tracking branch, or tag pointing at a commit. */
+export interface GitRef {
+  name: string;
+  kind: 'branch' | 'remote' | 'tag';
+  /** true for the branch HEAD is on */
+  head: boolean;
+}
+
+/** One commit in the graph. `parents` is what the renderer draws lanes from. */
+export interface GitCommit {
+  oid: string;
+  short: string;
+  parents: string[];
+  author: string;
+  /** unix seconds */
+  timestamp: number;
+  subject: string;
+  refs: GitRef[];
+}
+
+export interface GitHistoryResult {
+  isRepo: boolean;
+  commits: GitCommit[];
+}
+
+/** One changed file inside a commit, with its patch and its own line counts. */
+export interface GitCommitFile {
+  path: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch: string;
+}
+
+/** Everything the commit detail page renders. */
+export interface GitCommitDetail {
+  isRepo: boolean;
+  oid: string;
+  short: string;
+  author: string;
+  email: string;
+  /** unix seconds */
+  timestamp: number;
+  subject: string;
+  /** the commit message with its subject line removed */
+  body: string;
+  parents: string[];
+  refs: GitRef[];
+  files: GitCommitFile[];
+  additions: number;
+  deletions: number;
+}
+
 /* ---------------- agent runtime detection ----------------
    herdr-style: process identity from the process table plus a
    screen-manifest state evaluation over the live terminal buffer. */
@@ -432,6 +485,8 @@ export interface BentomuxApi {
   gitDiffStat(workspaceId: string): Promise<GitDiffStatResult>;
   gitPush(workspaceId: string, setUpstream: boolean): Promise<GitCommandResult>;
   gitRemoteInfo(workspaceId: string): Promise<GitRemoteInfo>;
+  gitHistory(workspaceId: string): Promise<GitHistoryResult>;
+  gitShow(workspaceId: string, oid: string): Promise<GitCommitDetail>;
 
   /* agents & resources */
   agents(): Promise<AgentInfo[]>;

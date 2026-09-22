@@ -132,16 +132,18 @@ function loadingBody(): HTMLElement {
   return h('div', { class: 'diff-editor diff-empty' }, 'Loading diff…');
 }
 
-function emptyBody(): HTMLElement {
+export function emptyBody(): HTMLElement {
   return h('div', { class: 'diff-editor diff-empty' }, 'No changes.');
 }
 
-function errorBody(msg: string): HTMLElement {
+export function errorBody(msg: string): HTMLElement {
   return h('div', { class: 'diff-editor' },
     h('div', { class: 'diff-err' }, msg));
 }
 
-function diffBody(file: GitFileDiff | null, filePath: string): HTMLElement {
+/* one file's patch, as the 4-column grid. Exported because the commit detail
+   page renders a patch per changed file with the same rows. */
+export function diffBody(file: GitFileDiff | null, filePath: string): HTMLElement {
   if (!file || !file.patch) return emptyBody();
   const parsed = parseUnifiedDiff(file.patch);
   if (!parsed.length) return emptyBody();

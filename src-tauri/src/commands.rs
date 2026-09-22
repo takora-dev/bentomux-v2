@@ -515,6 +515,20 @@ pub async fn git_remote_info(workspace_id: String, state: State<'_, AppStateMana
 }
 
 #[tauri::command]
+pub async fn git_history(workspace_id: String, state: State<'_, AppStateManager>) -> Result<crate::git::GitHistoryResult, String> {
+    let path = workspace_path(&workspace_id, &state)?;
+    git_off_main(move || crate::git::history(&path)).await
+}
+
+#[tauri::command]
+pub async fn git_show(workspace_id: String, oid: String, state: State<'_, AppStateManager>) -> Result<crate::git::GitCommitDetail, String> {
+    let path = workspace_path(&workspace_id, &state)?;
+    /* `detail` is the one git reader that returns a Result, so the two layers of
+       error are flattened here rather than swallowed */
+    git_off_main(move || crate::git::detail(&path, &oid)).await?
+}
+
+#[tauri::command]
 pub fn git_branch_for(path: String) -> Result<Option<String>, String> {
     crate::git::branch_for(&path)
 }

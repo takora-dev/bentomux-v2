@@ -2,7 +2,10 @@
    Rust port of src/main/git.rs (branch watch) + src/main/git-ops.ts
    (status/diff/push/remoteInfo). Reads .git/HEAD directly for the branch
    and polls the git dir; shells out to git (never node-pty) for the ops.
-   Handles .git as a file (worktrees / submodules). */
+   Handles .git as a file (worktrees / submodules).
+
+   `history()` is the one addition with no Electron counterpart — the commit
+   graph is new UI, not a port (see docs/adr/0002-parity-rule-amended.md). */
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -272,6 +275,39 @@ pub struct GitRemoteInfo {
     pub default_branch: Option<String>,
 }
 
+/* ---------------- history (commit graph) ---------------- */
+
+/* a branch, remote-tracking branch, or tag pointing at a commit */
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRef {
+    pub name: String,
+    /* "branch" | "remote" | "tag" */
+    pub kind: String,
+    /* true for the branch HEAD is on */
+    pub head: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommit {
+    pub oid: String,
+    pub short: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    /* unix seconds */
+    pub timestamp: i64,
+    pub subject: String,
+    pub refs: Vec<GitRef>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHistoryResult {
+    pub is_repo: bool,
+    pub commits: Vec<GitCommit>,
+}
+
 const MAX_BUFFER: usize = 8 * 1024 * 1024; /* 8 MiB per stream — git diff of a big repo */
 const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 
@@ -347,6 +383,12 @@ fn drain_capped(reader: impl std::io::Read) -> String {
     }
     out
 }
+
+/* Every git call here is a process spawn, and on macOS a spawn costs ~90ms
+   whatever it runs (`git --version` measures the same as `git log -n200`). The
+   work git does is a rounding error next to that, so the thing worth minimising
+   is the *number* of spawns, and any two calls that do not depend on each other
+   run on their own thread. `scope` lets them borrow ws_path/oid directly. */
 
 fn ensure_ok(r: &RunOutput, what: &str) -> Result<(), String> {
     if r.code == 0 {
@@ -480,28 +522,66 @@ pub fn diff(ws_path: &str, path: Option<&str>) -> GitDiffResult {
 }
 
 fn parse_diff_blocks(stdout: &str) -> Vec<GitFileDiff> {
-    let mut files = Vec::new();
-    for block in stdout.split("diff --git ").filter(|b| !b.is_empty()) {
-        let header = block.lines().next().unwrap_or("");
-        /* "a/<path> b/<path>" — the simple split on " b/" handles common paths */
-        let file_path = match header.find(" b/") {
-            Some(idx) => header[idx + 3..].to_string(),
-            None => header.to_string(),
-        };
-        let status = if block.contains("new file") {
-            "A"
-        } else if block.contains("deleted file") {
-            "D"
-        } else if block.contains("rename ") {
-            "R"
-        } else if block.contains("copy ") {
-            "C"
-        } else {
-            "M"
-        };
-        files.push(GitFileDiff { path: file_path, status: status.to_string(), patch: format!("diff --git {}", block) });
+    diff_blocks(stdout)
+        .map(|block| {
+            let (path, status) = block_path_status(block);
+            GitFileDiff { path, status, patch: format!("diff --git {}", block) }
+        })
+        .collect()
+}
+
+/* the per-file blocks of a `git diff` / `git show` patch. Every caller splits
+   the same way, so the split lives here rather than being repeated. */
+fn diff_blocks(stdout: &str) -> impl Iterator<Item = &str> {
+    stdout.split("diff --git ").filter(|b| !b.is_empty())
+}
+
+fn block_path_status(block: &str) -> (String, String) {
+    let header = block.lines().next().unwrap_or("");
+    /* "a/<path> b/<path>" — the simple split on " b/" handles common paths */
+    let path = match header.find(" b/") {
+        Some(idx) => header[idx + 3..].to_string(),
+        None => header.to_string(),
+    };
+    let status = if block.contains("new file") {
+        "A"
+    } else if block.contains("deleted file") {
+        "D"
+    } else if block.contains("rename ") {
+        "R"
+    } else if block.contains("copy ") {
+        "C"
+    } else {
+        "M"
+    };
+    (path, status.to_string())
+}
+
+/* +N/-N for one file's block, counted from the patch itself so the commit
+   detail view needs one git call instead of a second --numstat pass.
+
+   Counting starts at the first `@@`: before it, `---`/`+++` are file headers,
+   but inside a hunk a line reading `+++foo` is genuinely an added line and
+   must count. Binary files have no hunk and correctly report 0/0. */
+fn count_patch_lines(block: &str) -> (u64, u64) {
+    let mut adds = 0u64;
+    let mut dels = 0u64;
+    let mut in_hunk = false;
+    for line in block.lines() {
+        if line.starts_with("@@") {
+            in_hunk = true;
+            continue;
+        }
+        if !in_hunk || line.starts_with('\\') {
+            continue; /* headers, and the "\ No newline at end of file" marker */
+        }
+        if line.starts_with('+') {
+            adds += 1;
+        } else if line.starts_with('-') {
+            dels += 1;
+        }
     }
-    files
+    (adds, dels)
 }
 
 /* ---------------- diff stat (totals for the Changes pill) ---------------- */
@@ -589,6 +669,275 @@ pub fn remote_info(ws_path: &str) -> GitRemoteInfo {
     GitRemoteInfo { is_repo: true, remote: Some(remote), default_branch }
 }
 
+/* ---------------- history (commit graph) ---------------- */
+
+/* the graph renders `-n` commits at a time; a repo with a longer history just
+   shows the newest window rather than paging */
+const HISTORY_LIMIT: usize = 200;
+/* record/field separators for `git log --pretty=format:` — control characters
+   cannot appear in a subject or author name, so they are unambiguous */
+const FIELD_SEP: char = '\u{1f}';
+const RECORD_SEP: char = '\u{1e}';
+
+fn ref_kind_and_name(full: &str) -> Option<(&'static str, &str)> {
+    if let Some(n) = full.strip_prefix("refs/heads/") {
+        Some(("branch", n))
+    } else if let Some(n) = full.strip_prefix("refs/remotes/") {
+        Some(("remote", n))
+    } else if let Some(n) = full.strip_prefix("refs/tags/") {
+        Some(("tag", n))
+    } else {
+        None
+    }
+}
+
+/* `%(objectname)\x1f%(*objectname)\x1f%(HEAD)\x1f%(refname)` → (commit oid, ref).
+   An annotated tag's ref points at the tag object, so `%(*objectname)` (the
+   dereferenced commit) wins when it is present. */
+fn parse_ref_line(line: &str) -> Option<(String, GitRef)> {
+    let mut it = line.split(FIELD_SEP);
+    let obj = it.next()?.trim();
+    let deref = it.next().unwrap_or("").trim();
+    let head = it.next().unwrap_or("").trim() == "*";
+    let full = it.next()?.trim();
+    let oid = if deref.is_empty() { obj } else { deref };
+    let (kind, name) = ref_kind_and_name(full)?;
+    /* refs/remotes/<remote>/HEAD is a symbolic ref to the remote's default
+       branch — it duplicates that branch's label, so it is dropped */
+    if name.ends_with("/HEAD") {
+        return None;
+    }
+    Some((
+        oid.to_string(),
+        GitRef { name: name.to_string(), kind: kind.to_string(), head },
+    ))
+}
+
+fn sort_refs(refs: &mut [GitRef]) {
+    refs.sort_by_key(|r| match (r.head, r.kind.as_str()) {
+        (true, _) => 0,
+        (false, "branch") => 1,
+        (false, "remote") => 2,
+        _ => 3,
+    });
+}
+
+/* every branch / remote branch / tag, keyed by the commit it points at */
+fn collect_refs(ws_path: &str) -> HashMap<String, Vec<GitRef>> {
+    let mut refs: HashMap<String, Vec<GitRef>> = HashMap::new();
+    let ref_fmt = format!(
+        "--format=%(objectname){sep}%(*objectname){sep}%(HEAD){sep}%(refname)",
+        sep = FIELD_SEP
+    );
+    let Ok(fr) = run_process(
+        ws_path,
+        &["for-each-ref", ref_fmt.as_str(), "refs/heads", "refs/remotes", "refs/tags"],
+        None,
+    ) else {
+        return refs;
+    };
+    if fr.code == 0 {
+        for line in fr.stdout.lines() {
+            if let Some((oid, r)) = parse_ref_line(line) {
+                refs.entry(oid).or_default().push(r);
+            }
+        }
+    }
+    refs
+}
+
+/* `--date-order` is load-bearing, not cosmetic: it guarantees no parent is
+   listed before all of its children, which is the invariant the renderer's
+   lane assignment relies on. */
+pub fn history(ws_path: &str) -> GitHistoryResult {
+    if git_dir_for(ws_path).is_none() {
+        return GitHistoryResult::default();
+    }
+    let pretty = format!(
+        "--pretty=format:%H{sep}%P{sep}%an{sep}%at{sep}%s{rec}",
+        sep = FIELD_SEP,
+        rec = RECORD_SEP
+    );
+    let limit = format!("-n{}", HISTORY_LIMIT);
+    let args = ["log", "--all", "--date-order", limit.as_str(), pretty.as_str(), "--no-color"];
+    /* the log and the refs are independent, so they spawn side by side: serially
+       they cost ~180ms of pure process startup for a panel open */
+    let (log, refs) = std::thread::scope(|s| {
+        let l = s.spawn(|| run_process(ws_path, &args, None));
+        let r = s.spawn(|| collect_refs(ws_path));
+        (
+            l.join().ok().and_then(Result::ok),
+            /* refs are decoration — a panicked worker costs labels, not the graph */
+            r.join().ok().unwrap_or_default(),
+        )
+    });
+    let Some(r) = log else {
+        return GitHistoryResult { is_repo: true, ..Default::default() };
+    };
+    /* a repo with no commits yet exits non-zero with an empty stdout; that is
+       an empty graph, not a failure */
+    if r.code != 0 && r.stdout.trim().is_empty() {
+        return GitHistoryResult { is_repo: true, commits: Vec::new() };
+    }
+    if let Err(e) = ensure_ok(&r, "git log") {
+        eprintln!("[bentomux] git log: {}", e);
+        return GitHistoryResult { is_repo: true, commits: Vec::new() };
+    }
+
+    let mut refs = refs;
+
+    let mut commits = Vec::new();
+    for record in r.stdout.split(RECORD_SEP) {
+        /* git separates records with a newline, which lands at the head of
+           every record after the first */
+        let record = record.trim_start_matches('\n');
+        if record.is_empty() {
+            continue;
+        }
+        let mut it = record.split(FIELD_SEP);
+        let oid = it.next().unwrap_or("").to_string();
+        if oid.is_empty() {
+            continue;
+        }
+        let parents: Vec<String> = it.next().unwrap_or("").split_whitespace().map(String::from).collect();
+        let author = it.next().unwrap_or("").to_string();
+        let timestamp: i64 = it.next().unwrap_or("0").trim().parse().unwrap_or(0);
+        let subject = it.next().unwrap_or("").to_string();
+        let mut commit_refs = refs.remove(&oid).unwrap_or_default();
+        sort_refs(&mut commit_refs);
+        commits.push(GitCommit {
+            short: oid.chars().take(7).collect(),
+            oid,
+            parents,
+            author,
+            timestamp,
+            subject,
+            refs: commit_refs,
+        });
+    }
+    GitHistoryResult { is_repo: true, commits }
+}
+
+/* ---------------- commit detail ---------------- */
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommitFile {
+    pub path: String,
+    pub status: String,
+    pub additions: u64,
+    pub deletions: u64,
+    pub patch: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommitDetail {
+    pub is_repo: bool,
+    pub oid: String,
+    pub short: String,
+    pub author: String,
+    pub email: String,
+    /* unix seconds */
+    pub timestamp: i64,
+    pub subject: String,
+    /* the commit message with its subject line removed */
+    pub body: String,
+    pub parents: Vec<String>,
+    pub refs: Vec<GitRef>,
+    pub files: Vec<GitCommitFile>,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+/* Unlike status/diff/history, this one reports failure instead of returning an
+   empty default: the user asked for one specific commit, and silently showing
+   an empty page for a bad oid would read as "this commit is empty". */
+pub fn detail(ws_path: &str, oid: &str) -> Result<GitCommitDetail, String> {
+    if git_dir_for(ws_path).is_none() {
+        return Ok(GitCommitDetail::default());
+    }
+    let meta_fmt = format!(
+        "--format=%H{sep}%P{sep}%an{sep}%ae{sep}%at{sep}%s{sep}%b",
+        sep = FIELD_SEP
+    );
+    let meta_args = ["show", "-s", meta_fmt.as_str(), "--no-color", oid];
+    /* `--first-parent` is load-bearing here too: a plain `git show <merge>`
+       prints no diff at all, so every merge commit would look empty. With it,
+       a merge diffs against its first parent — which is what the graph row the
+       user clicked implies. */
+    let patch_args = [
+        "show", "--format=", "--patch", "--first-parent",
+        "--no-color", "--no-ext-diff", "--unified=3", oid,
+    ];
+
+    /* all three are independent; serially they are ~285ms of process startup
+       for one click, in parallel the page waits for the slowest single spawn */
+    let (meta, patch, mut refs) = std::thread::scope(|s| {
+        let m = s.spawn(|| run_process(ws_path, &meta_args, None));
+        let p = s.spawn(|| run_process(ws_path, &patch_args, None));
+        let r = s.spawn(|| collect_refs(ws_path));
+        (
+            m.join().ok().and_then(Result::ok),
+            p.join().ok().and_then(Result::ok),
+            r.join().ok().unwrap_or_default(),
+        )
+    });
+    let meta = meta.ok_or("git show could not be run")?;
+    ensure_ok(&meta, "git show")?;
+    /* a patch that failed to run is not fatal: the message, the parents and the
+       decorations are still worth showing, so an empty file list is the honest
+       degradation rather than an error page */
+    let patch = patch.filter(|d| d.code == 0);
+
+    let mut fields = meta.stdout.split(FIELD_SEP);
+    let full = fields.next().unwrap_or("").trim().to_string();
+    let parents: Vec<String> = fields.next().unwrap_or("").split_whitespace().map(String::from).collect();
+    let author = fields.next().unwrap_or("").to_string();
+    let email = fields.next().unwrap_or("").to_string();
+    let timestamp: i64 = fields.next().unwrap_or("0").trim().parse().unwrap_or(0);
+    let subject = fields.next().unwrap_or("").to_string();
+    /* %b is the last field, so it keeps whatever newlines the message had */
+    let body = fields.next().unwrap_or("").trim_end().to_string();
+
+    let mut files = Vec::new();
+    let mut additions = 0u64;
+    let mut deletions = 0u64;
+    if let Some(d) = patch {
+        for block in diff_blocks(&d.stdout) {
+            let (path, status) = block_path_status(block);
+            let (adds, dels) = count_patch_lines(block);
+            additions += adds;
+            deletions += dels;
+            files.push(GitCommitFile {
+                path,
+                status,
+                additions: adds,
+                deletions: dels,
+                patch: format!("diff --git {}", block),
+            });
+        }
+    }
+
+    let mut refs = refs.remove(&full).unwrap_or_default();
+    sort_refs(&mut refs);
+    Ok(GitCommitDetail {
+        is_repo: true,
+        short: full.chars().take(7).collect(),
+        oid: full,
+        author,
+        email,
+        timestamp,
+        subject,
+        body,
+        parents,
+        refs,
+        files,
+        additions,
+        deletions,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,6 +1015,238 @@ mod tests {
         let info = remote_info(&repo);
         assert!(info.is_repo);
         assert_eq!(info.remote, None);
+    }
+
+    #[test]
+    fn git_history_orders_children_before_parents() {
+        let repo = temp_repo("history");
+        write_file(&repo, "a.txt", "one\n");
+        run_process(&repo, &["add", "a.txt"], None).unwrap();
+        run_process(&repo, &["commit", "-qm", "first"], None).unwrap();
+        run_process(&repo, &["checkout", "-qb", "side"], None).unwrap();
+        write_file(&repo, "b.txt", "two\n");
+        run_process(&repo, &["add", "b.txt"], None).unwrap();
+        run_process(&repo, &["commit", "-qm", "side work"], None).unwrap();
+        run_process(&repo, &["checkout", "-q", "-"], None).unwrap();
+        /* annotated tag: its ref points at the tag object, not the commit, so
+           this is what exercises the %(*objectname) dereference */
+        run_process(&repo, &["tag", "-a", "v1.0", "-m", "release"], None).unwrap();
+
+        let h = history(&repo);
+        assert!(h.is_repo);
+        assert_eq!(h.commits.len(), 2);
+        assert_eq!(h.commits[0].subject, "side work");
+        assert_eq!(h.commits[1].subject, "first");
+        /* the invariant the lane layout depends on: every parent appears
+           after its child */
+        let pos: std::collections::HashMap<&str, usize> =
+            h.commits.iter().enumerate().map(|(i, c)| (c.oid.as_str(), i)).collect();
+        for (i, c) in h.commits.iter().enumerate() {
+            for p in &c.parents {
+                if let Some(&pi) = pos.get(p.as_str()) {
+                    assert!(pi > i, "parent {} listed before child {}", p, c.oid);
+                }
+            }
+        }
+        /* the checked-out branch is labelled, and marked as HEAD */
+        let head_refs: Vec<&GitRef> = h.commits.iter().flat_map(|c| &c.refs).filter(|r| r.head).collect();
+        assert_eq!(head_refs.len(), 1, "exactly one HEAD ref: {:?}", head_refs);
+        assert_eq!(head_refs[0].kind, "branch");
+        assert!(!head_refs[0].name.contains('/'), "a local branch, not origin/…");
+
+        /* the annotated tag resolved to the commit it points at, and is not
+           mistaken for a branch */
+        let tagged: Vec<&GitRef> = h.commits.iter().flat_map(|c| &c.refs).filter(|r| r.kind == "tag").collect();
+        assert_eq!(tagged.len(), 1, "one tag ref: {:?}", tagged);
+        assert_eq!(tagged[0].name, "v1.0");
+        assert!(!tagged[0].head);
+        assert!(
+            h.commits[0].refs.iter().any(|r| r.name == "side"),
+            "the branch we checked out and left is labelled: {:?}",
+            h.commits[0].refs
+        );
+        /* the tag points at the base commit, which is also where HEAD went back
+           to — so that row carries both, and HEAD sorts first so the label row
+           reads like `git log --decorate` */
+        let decorated = h.commits.iter().find(|c| c.refs.iter().any(|r| r.head)).expect("a HEAD row");
+        assert_eq!(decorated.refs.len(), 2, "HEAD branch + tag: {:?}", decorated.refs);
+        assert!(decorated.refs[0].head, "HEAD ref leads the list: {:?}", decorated.refs);
+        assert_eq!(decorated.refs[1].kind, "tag");
+        assert_eq!(h.commits[0].short.len(), 7);
+        assert!(h.commits[0].timestamp > 0);
+    }
+
+    #[test]
+    fn count_patch_lines_counts_hunk_content_only() {
+        /* a line whose content starts with `--` or `++` is content, not a file
+           header, and must still count */
+        let block = "a/x.txt b/x.txt\n\
+index 111..222 100644\n\
+--- a/x.txt\n\
++++ b/x.txt\n\
+@@ -1,3 +1,3 @@\n\
+ ctx\n\
+---removed dashes\n\
++++added pluses\n\
+\\ No newline at end of file\n";
+        assert_eq!(count_patch_lines(block), (1, 1));
+
+        /* binary: no hunk, so no counts */
+        let binary = "a/logo.png b/logo.png\nBinary files a/logo.png and b/logo.png differ\n";
+        assert_eq!(count_patch_lines(binary), (0, 0));
+    }
+
+    #[test]
+    fn git_detail_reports_message_files_and_counts() {
+        let repo = temp_repo("detail");
+        write_file(&repo, "a.txt", "one\n");
+        run_process(&repo, &["add", "a.txt"], None).unwrap();
+        run_process(&repo, &["commit", "-qm", "first\n\nWhy it matters."], None).unwrap();
+        write_file(&repo, "a.txt", "one\ntwo\n");
+        run_process(&repo, &["add", "a.txt"], None).unwrap();
+        run_process(&repo, &["commit", "-qm", "second"], None).unwrap();
+
+        let head = history(&repo).commits[0].oid.clone();
+        let d = detail(&repo, &head).expect("detail for a real commit");
+        assert!(d.is_repo);
+        assert_eq!(d.oid, head);
+        assert_eq!(d.short.len(), 7);
+        assert_eq!(d.subject, "second");
+        assert_eq!(d.author, "test");
+        assert!(d.timestamp > 0);
+        assert_eq!(d.parents.len(), 1);
+        assert_eq!(d.files.len(), 1);
+        assert_eq!(d.files[0].path, "a.txt");
+        assert_eq!(d.files[0].status, "M");
+        assert_eq!(d.files[0].additions, 1);
+        assert_eq!(d.files[0].deletions, 0);
+        assert_eq!((d.additions, d.deletions), (1, 0));
+        assert!(d.files[0].patch.contains("@@"));
+        /* HEAD points at the newest commit, so that is the decorated one */
+        assert!(d.refs.iter().any(|r| r.head), "the HEAD branch is decorated: {:?}", d.refs);
+
+        /* a multi-line message keeps its body, minus the subject */
+        let root = d.parents[0].clone();
+        let first = detail(&repo, &root).expect("detail for the root commit");
+        assert_eq!(first.subject, "first");
+        assert_eq!(first.body, "Why it matters.");
+        assert!(first.parents.is_empty(), "root commit has no parents");
+        assert_eq!(first.files[0].status, "A");
+        assert!(first.refs.is_empty(), "the root commit carries no refs: {:?}", first.refs);
+    }
+
+    /* `git show <merge>` prints no diff at all, so without --first-parent every
+       merge commit would render as an empty page. This is the guard for that. */
+    #[test]
+    fn git_detail_of_a_merge_diffs_against_its_first_parent() {
+        let repo = temp_repo("detail-merge");
+        write_file(&repo, "a.txt", "one\n");
+        run_process(&repo, &["add", "a.txt"], None).unwrap();
+        run_process(&repo, &["commit", "-qm", "base"], None).unwrap();
+        run_process(&repo, &["checkout", "-qb", "side"], None).unwrap();
+        write_file(&repo, "b.txt", "two\n");
+        run_process(&repo, &["add", "b.txt"], None).unwrap();
+        run_process(&repo, &["commit", "-qm", "side work"], None).unwrap();
+        run_process(&repo, &["checkout", "-q", "-"], None).unwrap();
+        run_process(&repo, &["merge", "-q", "--no-ff", "side", "-m", "merge side"], None).unwrap();
+
+        let head = history(&repo).commits[0].oid.clone();
+        let d = detail(&repo, &head).expect("detail for the merge");
+        assert_eq!(d.parents.len(), 2, "a merge has two parents");
+        assert_eq!(d.files.len(), 1, "the merge is not empty: {:?}", d.files);
+        assert_eq!(d.files[0].path, "b.txt");
+        assert_eq!(d.files[0].status, "A");
+        assert_eq!(d.files[0].additions, 1);
+    }
+
+    #[test]
+    fn git_detail_of_an_unknown_oid_is_an_error() {
+        let repo = temp_repo("detail-bad");
+        write_file(&repo, "a.txt", "one\n");
+        run_process(&repo, &["add", "a.txt"], None).unwrap();
+        run_process(&repo, &["commit", "-qm", "first"], None).unwrap();
+        assert!(detail(&repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").is_err());
+        /* outside a repo there is nothing to look up, but that is not an error */
+        let outside = std::env::temp_dir().to_string_lossy().into_owned();
+        assert!(!detail(&outside, "HEAD").expect("not-a-repo is a value").is_repo);
+    }
+
+    #[test]
+    fn git_detail_line_counts_match_git_numstat() {
+        /* the counts are derived from the patch rather than a second --numstat
+           call, so this cross-checks them against git's own arithmetic on a
+           commit that adds, deletes, and renames in one go */
+        let repo = temp_repo("detail-counts");
+        write_file(&repo, "keep.txt", "a\nb\nc\n");
+        write_file(&repo, "gone.txt", "x\n");
+        write_file(&repo, "old.txt", "one\ntwo\nthree\n");
+        run_process(&repo, &["add", "."], None).unwrap();
+        run_process(&repo, &["commit", "-qm", "base"], None).unwrap();
+
+        write_file(&repo, "keep.txt", "a\nB\nc\nd\n");
+        run_process(&repo, &["rm", "-q", "gone.txt"], None).unwrap();
+        run_process(&repo, &["mv", "old.txt", "new.txt"], None).unwrap();
+        write_file(&repo, "added.txt", "p\nq\n");
+        run_process(&repo, &["add", "."], None).unwrap();
+        run_process(&repo, &["commit", "-qm", "mixed"], None).unwrap();
+
+        let head = history(&repo).commits[0].oid.clone();
+        let d = detail(&repo, &head).expect("detail for the mixed commit");
+        assert_eq!(d.files.len(), 4, "add, delete, rename, modify: {:?}", d.files);
+
+        /* git's own numbers for the same commit */
+        let ns = run_process(&repo, &["show", "--numstat", "--format=", "--first-parent", &head], None).unwrap();
+        let mut expected = 0u64;
+        for line in ns.stdout.lines().filter(|l| !l.trim().is_empty()) {
+            let mut it = line.splitn(3, '\t');
+            let a = it.next().unwrap_or("");
+            let del = it.next().unwrap_or("");
+            if a == "-" || del == "-" {
+                continue; /* binary */
+            }
+            expected += a.parse::<u64>().unwrap_or(0);
+        }
+        assert_eq!(d.additions, expected, "additions disagree with git --numstat");
+
+        let modified = d.files.iter().find(|f| f.path == "keep.txt").expect("keep.txt");
+        assert_eq!((modified.additions, modified.deletions), (2, 1), "replaced b with B and appended d");
+        let renamed = d.files.iter().find(|f| f.path == "new.txt").expect("rename target");
+        assert_eq!(renamed.status, "R");
+        let removed = d.files.iter().find(|f| f.path == "gone.txt").expect("gone.txt");
+        assert_eq!((removed.status.as_str(), removed.deletions), ("D", 1));
+    }
+
+    #[test]
+    fn git_history_empty_repo_is_not_an_error() {
+        let repo = temp_repo("history-empty");
+        let h = history(&repo);
+        assert!(h.is_repo);
+        assert!(h.commits.is_empty());
+
+        let outside = std::env::temp_dir().to_string_lossy().into_owned();
+        assert!(!history(&outside).is_repo);
+    }
+
+    #[test]
+    fn parse_ref_line_classifies_and_dereferences() {
+        /* annotated tag: objectname is the tag object, *objectname the commit */
+        let (oid, r) = parse_ref_line("tagobj\u{1f}commitsha\u{1f}\u{1f}refs/tags/v1.0").unwrap();
+        assert_eq!(oid, "commitsha");
+        assert_eq!(r.name, "v1.0");
+        assert_eq!(r.kind, "tag");
+        assert!(!r.head);
+
+        let (oid, r) = parse_ref_line("abc\u{1f}\u{1f}*\u{1f}refs/heads/main").unwrap();
+        assert_eq!(oid, "abc");
+        assert!(r.head && r.kind == "branch");
+
+        let (_, r) = parse_ref_line("abc\u{1f}\u{1f}\u{1f}refs/remotes/origin/main").unwrap();
+        assert_eq!(r.name, "origin/main");
+        assert_eq!(r.kind, "remote");
+
+        /* the remote's symbolic default-branch ref duplicates origin/main */
+        assert!(parse_ref_line("abc\u{1f}\u{1f}\u{1f}refs/remotes/origin/HEAD").is_none());
+        assert!(parse_ref_line("abc\u{1f}\u{1f}\u{1f}refs/stash").is_none());
     }
 
     /* porcelain -z splits renames across NUL segments. Faithful to the Electron

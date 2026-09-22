@@ -102,12 +102,14 @@ function tabKind(t: TabEntry): string {
   if (t.route.view === 'terminal') return 'Terminal tab';
   if (t.route.view === 'agentDetail') return 'Agent · ' + t.route.tab;
   if (t.route.view === 'diff') return 'File diff';
+  if (t.route.view === 'commit') return 'Commit · ' + t.route.short;
   return 'Agents page';
 }
 
 function tabIcon(t: TabEntry): keyof typeof IC {
   if (t.route.view === 'terminal') return 'git';
   if (t.route.view === 'agentDetail') return 'bot';
+  if (t.route.view === 'commit') return 'git2';
   return 'lines';
 }
 

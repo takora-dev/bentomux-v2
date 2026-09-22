@@ -10,13 +10,21 @@ import { db } from '../store';
 import { ui } from '../state';
 import { go } from '../router';
 import type {
-  GitStatusResult, GitRemoteInfo, GitStatusEntry,
+  GitStatusResult, GitRemoteInfo, GitStatusEntry, GitHistoryResult,
 } from '../../shared/types';
+import { graphBody } from './gitGraph';
 import api from '../../preload/bentomux';
 
 interface PanelState {
   status: GitStatusResult | null;
   remote: GitRemoteInfo | null;
+  /* null until the first fetch; the graph is not re-fetched by the silent
+     poll because `git log --all` is far heavier than `git status` */
+  history: GitHistoryResult | null;
+  /* the rendered graph node, reused across repaints while the commits are
+     unchanged — otherwise a background status change rebuilds 200 rows and
+     throws away the graph's scroll position */
+  graph: { key: string; node: HTMLElement } | null;
   /* a refresh (mount or button) is in flight and the panel shows a spinner */
   loading: boolean;
   /* any git pass is in flight, including silent background polls */
@@ -31,7 +39,8 @@ function activeWsId(): string | null {
   return db.activeWorkspaceId;
 }
 
-function formatStatusBadge(xy: string): string {
+/* shared with the commit detail page, which shows the same per-file badges */
+export function formatStatusBadge(xy: string): string {
   /* a one-letter per side (X = index, Y = worktree) is enough for the user;
      the full XY is in the title attribute. */
   if (xy === '??') return 'U';
@@ -41,7 +50,7 @@ function formatStatusBadge(xy: string): string {
   return (x === ' ' ? '·' : x) + (y === ' ' ? '·' : y);
 }
 
-function fileRowTitle(xy: string): string {
+export function fileRowTitle(xy: string): string {
   if (xy === '??') return 'Untracked';
   if (xy === '!!') return 'Ignored';
   const map: Record<string, string> = {
@@ -115,18 +124,69 @@ function fileRow(entry: GitStatusEntry, wsId: string): HTMLElement {
   return btn;
 }
 
+/* ---------------- history (commit graph) ---------------- */
+
+/* a graph rebuild is worth avoiding when nothing moved; the oids and the ref
+   decorations are everything the rendering depends on */
+function graphKey(commits: GitHistoryResult['commits']): string {
+  return commits.length + '|' + (commits[0]?.oid ?? '') + '|' +
+    commits.flatMap(c => c.refs.map(r => r.name + (r.head ? '*' : ''))).join(',');
+}
+
+/* the active commit lives in ui.route, so the panel has to repaint when the
+   route moves or the selected graph row keeps the previous highlight */
+function activeCommitOid(): string {
+  return ui.route.view === 'commit' ? ui.route.oid : '';
+}
+
+/* the selection lives in ui.route, so it is applied to the cached graph node in
+   place. Rebuilding the panel to change one class would reset the changes
+   list's scroll position on every commit click. */
+function markActive(node: HTMLElement, oid: string): void {
+  for (const row of node.querySelectorAll<HTMLElement>('.git-graph-row')) {
+    row.classList.toggle('active', row.dataset.oid === oid);
+  }
+}
+
+function buildHistory(state: PanelState): HTMLElement {
+  const commits = state.history?.commits ?? null;
+  const wrap = h('div', { class: 'git-section git-history' },
+    h('div', { class: 'git-section-h' },
+      h('span', { class: 'grow' }, 'History'),
+      h('span', { class: 'muted' }, commits ? commits.length + ' commits' : '')));
+
+  if (!commits) {
+    wrap.append(h('div', { class: 'git-empty' }, 'Loading…'));
+  } else if (state.history?.isRepo === false) {
+    wrap.append(h('div', { class: 'git-empty' }, 'Not a git repository.'));
+  } else if (!commits.length) {
+    wrap.append(h('div', { class: 'git-empty' }, 'No commits yet.'));
+  } else {
+    const key = graphKey(commits);
+    if (state.graph?.key !== key) state.graph = { key, node: graphBody(commits, activeWsId() ?? '') };
+    markActive(state.graph.node, activeCommitOid());
+    wrap.append(state.graph.node);
+  }
+  return wrap;
+}
+
 /* ---------------- data flow ---------------- */
 
 interface RefreshOpts {
-  /* background poll: no spinner, and no repaint when the data did not move,
-     so the file list keeps its scroll position while the panel sits idle */
+  /* background poll: no spinner, no history fetch, and no repaint when the
+     data did not move, so the file list keeps its scroll position while the
+     panel sits idle */
   silent?: boolean;
+  /* fetch the commit graph as well; defaults to on for a non-silent refresh */
+  history?: boolean;
 }
 
 async function refresh(state: PanelState, paint: () => void, opts: RefreshOpts = {}): Promise<void> {
   if (state.inflight) return; /* one git pass at a time per panel */
   state.inflight = true;
-  const before = JSON.stringify([state.status, state.remote]);
+  const wantHistory = opts.history ?? !opts.silent;
+  const snapshot = (): string => JSON.stringify([state.status, state.remote, state.history]);
+  const before = snapshot();
   if (!opts.silent) {
     state.loading = true;
     paint();
@@ -136,19 +196,34 @@ async function refresh(state: PanelState, paint: () => void, opts: RefreshOpts =
     if (!wsId) {
       state.status = { isRepo: false, branch: null, ahead: 0, behind: 0, entries: [], hasUntracked: false };
       state.remote = { isRepo: false, remote: null, defaultBranch: null };
+      state.history = { isRepo: false, commits: [] };
     } else {
-      const [s, r] = await Promise.all([api.gitStatus(wsId), api.gitRemoteInfo(wsId)]);
+      /* a silent poll is the 4s heartbeat, and it is the only thing here that
+         runs forever — so it asks for the two values that can actually change
+         under the user (status, line counts) and leaves the graph and the
+         remote alone. Each skipped call is ~120ms of git process startup. */
+      const wantSlow = wantHistory || !state.history || !state.remote;
+      const [s, r, hst, ds] = await Promise.all([
+        api.gitStatus(wsId),
+        wantSlow ? api.gitRemoteInfo(wsId) : Promise.resolve(null),
+        wantSlow ? api.gitHistory(wsId) : Promise.resolve(null),
+        api.gitDiffStat(wsId),
+      ]);
       state.status = s;
-      state.remote = r;
+      if (r) state.remote = r;
+      if (hst) state.history = hst;
+      /* the pill lives in the titlebar, outside this panel's DOM; painting it
+         here rather than calling refreshChangesPill() keeps the numstat call in
+         the batch above instead of adding a serial spawn after it */
+      paintChangesPill(ds.isRepo, ds.additions, ds.deletions);
     }
-    void refreshChangesPill();
   } catch (e: unknown) {
     console.error('gitPanel refresh failed', e);
   } finally {
     state.inflight = false;
     state.loading = false;
   }
-  if (!opts.silent || JSON.stringify([state.status, state.remote]) !== before) paint();
+  if (!opts.silent || snapshot() !== before) paint();
 }
 
 /* ---------------- Changes pill ----------------
@@ -185,16 +260,29 @@ export async function refreshChangesPill(): Promise<void> {
 /* the node the sidebar currently has mounted; `isConnected` is the invalidation
    signal — the sidebar clears the slot when the panel is closed, so a detached
    root means "rebuild (and re-fetch) on the next open" */
-let mounted: { wsId: string | null; root: HTMLElement } | null = null;
+let mounted: {
+  wsId: string | null;
+  root: HTMLElement;
+  commitOid: string;
+  /* re-mark the selected row on the already-mounted graph, without repainting */
+  markActive: (oid: string) => void;
+} | null = null;
 
 export function gitPanelPage(): HTMLElement {
   const wsId = activeWsId();
-  if (mounted && mounted.wsId === wsId && mounted.root.isConnected) return mounted.root;
+  if (mounted && mounted.wsId === wsId && mounted.root.isConnected) {
+    const oid = activeCommitOid();
+    if (mounted.commitOid !== oid) {
+      mounted.commitOid = oid;
+      mounted.markActive(oid);
+    }
+    return mounted.root;
+  }
 
   const root = h('div', { class: 'git-panel-root' });
 
   const state: PanelState = {
-    status: null, remote: null, loading: false, inflight: false,
+    status: null, remote: null, history: null, graph: null, loading: false, inflight: false,
   };
 
   function paint(): void {
@@ -202,11 +290,17 @@ export function gitPanelPage(): HTMLElement {
     root.append(
       buildHeader(state, paint),
       h('div', { class: 'git-panel-body' },
-        buildFilesList(state)),
+        buildFilesList(state),
+        buildHistory(state)),
     );
   }
 
-  mounted = { wsId, root };
+  mounted = {
+    wsId,
+    root,
+    commitOid: activeCommitOid(),
+    markActive: (oid) => { if (state.graph) markActive(state.graph.node, oid); },
+  };
   paint();
   void refresh(state, paint);
 
