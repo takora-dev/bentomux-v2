@@ -31,6 +31,7 @@ import { openModal } from './components/modal';
 import { initPlugins, ensureActive, pluginAssetUrl, onPluginsChanged, bindHost, onTeardown } from './plugin/loader';
 import { contributionIcon, contributionLabel } from './plugin/icons';
 import api from '../preload/bentomux';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 document.documentElement.classList.toggle('macos', /Mac/.test(navigator.platform));
 
 /* Suppress native browser context menu everywhere except inside
@@ -286,6 +287,36 @@ function wireWindowControls(): void {
   api.onMaximized(max => {
     ui.maximized = max;
     document.body.classList.toggle('maximized', max);
+  });
+  wireWindowDrag();
+}
+
+/* Manual window drag, threshold-based: invoke startDragging() only after the
+   pointer actually moves. Starting it on bare mousedown makes a click without
+   movement open a drag session that never sees the mouseup — macOS then eats
+   the next click and overrides the cursor. */
+const DRAG_SKIP = 'button, a, input, select, textarea, .tab';
+
+function wireWindowDrag(): void {
+  const bar = $('#titlebar');
+  let armed: { x: number; y: number } | null = null;
+  bar.addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    if ((e.target as Element).closest(DRAG_SKIP)) return;
+    e.preventDefault();
+    armed = { x: e.clientX, y: e.clientY };
+  });
+  window.addEventListener('mousemove', e => {
+    if (!armed) return;
+    if (e.buttons !== 1) { armed = null; return; }
+    if (Math.hypot(e.clientX - armed.x, e.clientY - armed.y) < 4) return;
+    armed = null;
+    void getCurrentWindow().startDragging();
+  });
+  window.addEventListener('mouseup', () => { armed = null; });
+  bar.addEventListener('dblclick', e => {
+    if ((e.target as Element).closest(DRAG_SKIP)) return;
+    api.toggleMaximize();
   });
 }
 
