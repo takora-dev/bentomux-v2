@@ -130,6 +130,12 @@ pub fn run() {
                         let _ = app_for_event.emit("win:maximized", now);
                     }
                 }
+                tauri::WindowEvent::CloseRequested { .. } => {
+                    /* approval-overlay remains alive after main closes. Exit
+                       explicitly so Windows does not leave a headless app
+                       process holding the single-instance lock. */
+                    app_for_event.exit(0);
+                }
                 _ => {}
             });
         }
