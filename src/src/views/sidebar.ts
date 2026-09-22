@@ -33,6 +33,12 @@ let dragTargetId: string | null = null;
 let dragBelow = false;
 let dragMoved = false;
 let suppressFolderClick = false;
+/* set on every folder pointerdown: whether that press started on the ⋯ dots.
+   Chromium (Windows WebView2) retargets the click to the row button as soon as
+   the pointer drifts off the dots, so the row must not toggle for that press. */
+let pressOnMenu = false;
+let dragStartX = 0;
+let dragStartY = 0;
 let paneDragId: string | null = null;
 let paneDragPointerId: number | null = null;
 let paneDragTargetId: string | null = null;
@@ -452,12 +458,17 @@ function startFolderPointerDrag(e: PointerEvent, row: HTMLElement, wsId: string)
   dragWsId = wsId;
   dragPointerId = e.pointerId;
   dragMoved = false;
+  dragStartX = e.clientX;
+  dragStartY = e.clientY;
   row.setPointerCapture(e.pointerId);
   e.preventDefault();
 }
 
 function moveFolderPointerDrag(e: PointerEvent): void {
   if (dragPointerId !== e.pointerId || !dragWsId) return;
+  /* same 5px threshold as pane drags: pointer jitter on a plain click must not
+     count as a drag, otherwise the click gets swallowed as a drop */
+  if (Math.hypot(e.clientX - dragStartX, e.clientY - dragStartY) < 5) return;
   dragMoved = true;
   document.body.classList.add('workspace-dragging');
   updateFolderDrag(e.clientX, e.clientY);
@@ -494,6 +505,7 @@ function workspaceFolder(ws: { id: string; name: string; path: string }, open: b
     title: ws.path,
     'data-ws': ws.id,
     onclick: () => {
+      if (pressOnMenu) return;
       if (suppressFolderClick) {
         suppressFolderClick = false;
         return;
@@ -504,7 +516,10 @@ function workspaceFolder(ws: { id: string; name: string; path: string }, open: b
     markup('span', { class: 'folder-icon' }, IC.folder),
     h('span', { class: 'folder-name' }, ws.name),
     workspaceMenuSpan(ws));
-  row.addEventListener('pointerdown', e => startFolderPointerDrag(e, row, ws.id));
+  row.addEventListener('pointerdown', e => {
+    pressOnMenu = e.target instanceof Element && e.target.closest('.ws-menu') != null;
+    startFolderPointerDrag(e, row, ws.id);
+  });
   row.addEventListener('pointermove', moveFolderPointerDrag);
   row.addEventListener('pointerup', endFolderPointerDrag);
   row.addEventListener('pointercancel', finishFolderDrag);
@@ -519,8 +534,12 @@ function workspaceMenuSpan(ws: { id: string; name: string; path: string }): HTML
     'aria-label': 'Workspace actions',
     role: 'button',
   }, markup('span', { class: 'ws-menu-icon' }, IC.dots));
-  span.addEventListener('click', (e: Event) => {
-    e.stopPropagation(); /* opening the menu must not also expand/collapse the folder */
+  /* pointerdown, not click: the click for this press may land on the parent
+     row button instead (see pressOnMenu), which would swallow the menu */
+  span.addEventListener('pointerdown', (e: PointerEvent) => {
+    if (e.button !== 0) return;
+    /* no stopPropagation: the row's pointerdown must still run so it records
+       pressOnMenu and skips starting a drag for this press */
     if (contextMenuAnchoredTo(span)) { closeContextMenu(); return; }
     const r = span.getBoundingClientRect();
     const entries: MenuEntry[] = [
