@@ -69,6 +69,21 @@ function subscribe<T>(event: string, cb: (payload: T) => void): () => void {
   };
 }
 
+async function invokeWithRetry<T>(command: string, attempts = 4): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await invoke<T>(command);
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 < attempts) {
+        await new Promise(resolve => window.setTimeout(resolve, 50 * 2 ** attempt));
+      }
+    }
+  }
+  throw lastError;
+}
+
 /* wry reports drag positions in different units per platform, and
    tauri-runtime-wry wraps every one of them in PhysicalPosition without
    converting:
@@ -116,7 +131,10 @@ const api = {
   onMaximized: (cb: (max: boolean) => void) => subscribe<boolean>('win:maximized', cb),
 
   /* persisted state */
-  getState: () => invoke<AppState>('get_state'),
+  /* WebView2 can dispatch the first IPC call while its native startup is
+     still settling. Retry only this read-only bootstrap call; later commands
+     run after boot has completed. */
+  getState: () => invokeWithRetry<AppState>('get_state'),
   setPrefs: (partial: Omit<Partial<Prefs>, 'font'> & { font?: string | null }) => invoke<AppState>('prefs_update', { partial }),
 
   /* workspaces */
