@@ -1201,7 +1201,7 @@ body:not(.pane-hidden) .titlebar.has-tabs .top-tools{display:flex!important}
 }
 .diff-line{
   display:grid;
-  grid-template-columns:56px 56px 22px 1fr;
+  grid-template-columns:56px 56px 22px minmax(0,1fr);
   align-items:stretch;
   white-space:pre;
 }
