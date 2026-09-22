@@ -27,6 +27,8 @@ interface Live {
 const lives = new Map<string, Live>();
 const pending = new Map<string, string>();
 const lastFocus = new Map<string, number>();
+const refreshQueue = new Set<Live>();
+let refreshFrame: number | null = null;
 
 /* Output for a pane that is not mounted yet (its workspace is not the active
    one) is buffered until it mounts. Without a cap a busy agent in a
@@ -87,18 +89,38 @@ function monoFont(): string {
   return fallback;
 }
 
-function repaintTerminals(): void {
-  if (document.visibilityState !== 'visible') return;
-  requestAnimationFrame(() => {
-    for (const live of lives.values()) {
-      if (!live.host.isConnected || parking.contains(live.host)) continue;
+function refitTerminal(live: Live, notifyPty = false): void {
+  if (!live.host.isConnected || parking.contains(live.host)) return;
+  try {
+    live.fit.fit();
+    live.term.refresh(0, Math.max(0, live.term.rows - 1));
+    if (notifyPty) api.resizeTab(live.id, live.term.cols, live.term.rows);
+  } catch {
+    /* terminal may be between tab mounts */
+  }
+}
+
+function queueTerminalRefresh(live: Live): void {
+  refreshQueue.add(live);
+  if (refreshFrame !== null) return;
+  refreshFrame = requestAnimationFrame(() => {
+    refreshFrame = null;
+    for (const queued of refreshQueue) {
+      if (!queued.host.isConnected || parking.contains(queued.host)) continue;
       try {
-        live.fit.fit();
-        live.term.refresh(0, Math.max(0, live.term.rows - 1));
+        queued.term.refresh(0, Math.max(0, queued.term.rows - 1));
       } catch {
         /* terminal may be between tab mounts */
       }
     }
+    refreshQueue.clear();
+  });
+}
+
+function repaintTerminals(): void {
+  if (document.visibilityState !== 'visible') return;
+  requestAnimationFrame(() => {
+    for (const live of lives.values()) refitTerminal(live);
   });
 }
 
@@ -115,7 +137,7 @@ export function applyTerminalFont(): void {
     live.term.options.fontSize = termFontSize();
     /* cell metrics changed; refit so lines fill the pane again.
        Parked hosts have no layout, so fit() would throw. */
-    if (live.host.isConnected && !parking.contains(live.host)) live.fit.fit();
+    refitTerminal(live, true);
   }
 }
 
@@ -133,6 +155,10 @@ export function initTerminalEvents(): void {
       !parking.contains(live.host)
     ) {
       live.term.write(chunk);
+      /* WebKit can defer xterm's canvas repaint until pointer interaction;
+         queue one explicit refresh per frame so output never needs selection
+         or manual resize to become visible. */
+      queueTerminalRefresh(live);
     } else {
       bufferPending(id, chunk);
     }
@@ -334,20 +360,13 @@ function observe(container: HTMLElement, live: Live): void {
   requestAnimationFrame(() => {
     if (live.observer) live.observer.disconnect();
     live.observer = new ResizeObserver(() => {
-      try {
-        live.fit.fit();
-        live.term.refresh(0, Math.max(0, live.term.rows - 1));
-      } catch {
-        /* not laid out yet */
-      }
+      requestAnimationFrame(() => refitTerminal(live, true));
     });
     live.observer.observe(container);
     try {
-      live.fit.fit();
-      live.term.refresh(0, Math.max(0, live.term.rows - 1));
       /* xterm does not emit resize when restored dimensions already match;
          still notify the persistent PTY so TUI apps redraw after reconnect. */
-      api.resizeTab(live.id, live.term.cols, live.term.rows);
+      refitTerminal(live, true);
     } catch {
       /* tiny container on first paint */
     }
@@ -476,7 +495,11 @@ export function terminalPage(start: PaneNode | string): HTMLElement {
       const buffered = pending.get(id);
       if (buffered) {
         pending.delete(id);
-        lives.get(id)?.term.write(buffered);
+        const live = lives.get(id);
+        if (live) {
+          live.term.write(buffered);
+          queueTerminalRefresh(live);
+        }
       }
     }
 
