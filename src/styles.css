@@ -1193,10 +1193,9 @@ body:not(.pane-hidden) .titlebar.has-tabs .top-tools{display:flex!important}
   background:var(--content-bg);
   font:var(--term-font-size,12.5px)/1.5 var(--term-font,var(--mono));
   color:var(--ink);
-  display:flex;flex-direction:column;
 }
 .diff-editor.diff-empty{
-  align-items:center;justify-content:center;
+  display:flex;align-items:center;justify-content:center;
   color:var(--ink-3);font-size:12.5px;
   padding:24px;
 }
@@ -1218,8 +1217,8 @@ body:not(.pane-hidden) .titlebar.has-tabs .top-tools{display:flex!important}
   color:var(--ink-3);user-select:none;font-weight:600;
 }
 .diff-line .code{
-  padding:0 10px;overflow:hidden;text-overflow:ellipsis;
-  white-space:pre;
+  padding:0 10px;overflow:hidden;overflow-wrap:anywhere;
+  white-space:pre-wrap;
 }
 .diff-line.diff-add{background:rgba(26,127,55,.10)}
 .diff-line.diff-add .sign{color:#1a7f37}
