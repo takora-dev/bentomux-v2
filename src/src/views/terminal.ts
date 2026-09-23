@@ -22,13 +22,15 @@ interface Live {
   fit: FitAddon;
   host: HTMLElement;
   observer: ResizeObserver | null;
+  lastCols: number;
+  lastRows: number;
 }
 
 const lives = new Map<string, Live>();
 const pending = new Map<string, string>();
 const lastFocus = new Map<string, number>();
-const refreshQueue = new Set<Live>();
-let refreshFrame: number | null = null;
+const outputQueue = new Map<Live, string>();
+let outputFrame: number | null = null;
 
 /* Output for a pane that is not mounted yet (its workspace is not the active
    one) is buffered until it mounts. Without a cap a busy agent in a
@@ -93,28 +95,34 @@ function refitTerminal(live: Live, notifyPty = false): void {
   if (!live.host.isConnected || parking.contains(live.host)) return;
   try {
     live.fit.fit();
-    live.term.refresh(0, Math.max(0, live.term.rows - 1));
-    if (notifyPty) api.resizeTab(live.id, live.term.cols, live.term.rows);
+    /* ResizeObserver fires on every layout pass; only the PTY when the grid
+       actually changed, or each notify triggers another TUI redraw */
+    if (notifyPty && (live.term.cols !== live.lastCols || live.term.rows !== live.lastRows)) {
+      live.lastCols = live.term.cols;
+      live.lastRows = live.term.rows;
+      api.resizeTab(live.id, live.lastCols, live.lastRows);
+    }
   } catch {
     /* terminal may be between tab mounts */
   }
 }
 
-function queueTerminalRefresh(live: Live): void {
-  refreshQueue.add(live);
-  if (refreshFrame !== null) return;
-  refreshFrame = requestAnimationFrame(() => {
-    refreshFrame = null;
-    for (const queued of refreshQueue) {
-      if (!queued.host.isConnected || parking.contains(queued.host)) continue;
-      try {
-        queued.term.refresh(0, Math.max(0, queued.term.rows - 1));
-      } catch {
-        /* terminal may be between tab mounts */
-      }
+function flushTerminalOutput(): void {
+  outputFrame = null;
+  for (const [live, output] of outputQueue) {
+    if (!live.host.isConnected || parking.contains(live.host)) continue;
+    try {
+      live.term.write(output);
+    } catch {
+      /* terminal may be between tab mounts */
     }
-    refreshQueue.clear();
-  });
+  }
+  outputQueue.clear();
+}
+
+function writeTerminalOutput(live: Live, chunk: string): void {
+  outputQueue.set(live, (outputQueue.get(live) || '') + chunk);
+  if (outputFrame === null) outputFrame = requestAnimationFrame(flushTerminalOutput);
 }
 
 function repaintTerminals(): void {
@@ -154,11 +162,9 @@ export function initTerminalEvents(): void {
       live.host.parentElement &&
       !parking.contains(live.host)
     ) {
-      live.term.write(chunk);
-      /* WebKit can defer xterm's canvas repaint until pointer interaction;
-         queue one explicit refresh per frame so output never needs selection
-         or manual resize to become visible. */
-      queueTerminalRefresh(live);
+      /* Batch PTY chunks before xterm parses them. Busy agents often emit many
+         small chunks; one write per frame avoids repeated parser overhead. */
+      writeTerminalOutput(live, chunk);
     } else {
       bufferPending(id, chunk);
     }
@@ -335,7 +341,7 @@ function ensureLive(tabId: string): Live {
   let live = lives.get(tabId);
   if (!live) {
     const { term, fit, host } = createXterm(tabId);
-    live = { id: tabId, term, fit, host, observer: null };
+    live = { id: tabId, term, fit, host, observer: null, lastCols: 0, lastRows: 0 };
     lives.set(tabId, live);
   }
   return live;
@@ -352,6 +358,7 @@ export function disposeTerminal(tabId: string): void {
   if (live.observer) live.observer.disconnect();
   try { live.term.dispose(); } catch { /* already gone */ }
   pending.delete(tabId);
+  outputQueue.delete(live);
   lastFocus.delete(tabId);
   lives.delete(tabId);
 }
@@ -496,10 +503,7 @@ export function terminalPage(start: PaneNode | string): HTMLElement {
       if (buffered) {
         pending.delete(id);
         const live = lives.get(id);
-        if (live) {
-          live.term.write(buffered);
-          queueTerminalRefresh(live);
-        }
+        if (live) writeTerminalOutput(live, buffered);
       }
     }
 

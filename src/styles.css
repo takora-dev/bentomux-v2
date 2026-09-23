@@ -752,7 +752,9 @@ html.drag-on, html.drag-on *{cursor:grabbing !important;user-select:none !import
    bordered card floated on --term-pad margins, so real gaps open up
    between them (pad + divider + pad). content-box keeps FitAddon's
    measurements equal to the usable text area. */
-.terminal-host{position:absolute;inset:0}
+/* containment: xterm canvas/DOM churn must not relayout the whole window */
+.terminal-host{position:absolute;inset:0;contain:layout paint}
+.mux-body{contain:layout paint}
 .terminal-host.drop-active{outline:2px dashed var(--accent);outline-offset:-3px}
 .mux-body.split .terminal-host{margin:var(--term-pad);padding:var(--term-pad-in);border:1px solid var(--line);border-radius:6px;box-sizing:content-box;transition:border-color .12s}
 .terminal-page .mux-body{position:relative;margin:0}
@@ -770,7 +772,7 @@ html.drag-on, html.drag-on *{cursor:grabbing !important;user-select:none !import
    50/50 split of one pane never resizes unrelated branches */
 .split-axis .split-axis{flex:1 1 0}
 .split-axis.stacked{flex-direction:column}
-.split-axis .pane{position:relative;flex:1 1 0;min-width:0;min-height:0;overflow:hidden}
+.split-axis .pane{position:relative;flex:1 1 0;min-width:0;min-height:0;overflow:hidden;contain:layout paint}
 .pane-divider{flex:0 0 3px;cursor:col-resize;transition:background .12s}
 .split-axis.stacked > .pane-divider{cursor:row-resize}
 .pane-divider:hover,body.resizing-panes .pane-divider,body.resizing-stacked .pane-divider{background:var(--accent)}

@@ -144,7 +144,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
-use sysinfo::{ProcessesToUpdate, ProcessRefreshKind, System};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use tauri::{Emitter, Manager};
 
 use crate::detect::{manifests::manifest_for, rules, screen};
@@ -412,18 +412,22 @@ fn match_agent(name: &str, cmd: Option<&str>) -> Option<&'static str> {
 }
 
 fn snapshot() -> Vec<Proc> {
-    /* NOTE (measured): narrowing this to ProcessRefreshKind::new().with_cmd(
-       OnlyIfNotSet) over a System reused across ticks — i.e. skipping the
-       per-process memory/disk/cwd/environ syscalls — came out at 55.0ms vs
-       56.7ms per tick over 867 processes (release, macOS). The cost is
-       dominated by the unconditional KERN_PROCARGS2 argv+env read that
-       sysinfo performs per process to populate `name`, which no refresh kind
-       avoids, so the extra machinery was not worth keeping. */
+    /* Runtime detection needs parent, name, and command only. Avoid refreshing
+       CPU, memory, disk, cwd, environment, and executable metadata for every
+       process on each tick. */
     let mut sys = System::new();
     sys.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
-        ProcessRefreshKind::everything(),
+        ProcessRefreshKind::new()
+            .with_cmd(UpdateKind::Always)
+            .without_cpu()
+            .without_memory()
+            .without_disk_usage()
+            .without_cwd()
+            .without_root()
+            .without_environ()
+            .without_exe(),
     );
     sys.processes()
         .iter()

@@ -48,7 +48,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 
 /* idle ticks (1s each) before a daemon with no live pane and no client exits */
 const IDLE_TICKS: u32 = 10;
-const SNAPSHOT_INTERVAL_MS: u64 = 250;
+/* Full text+HTML snapshots are expensive: runtime detection polls at 1 Hz,
+   while the terminal data stream remains realtime. */
+const SNAPSHOT_INTERVAL_MS: u64 = 500;
 
 /* ---------------- address ----------------
 
