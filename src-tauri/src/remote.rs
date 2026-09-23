@@ -524,11 +524,21 @@ async fn handle_incoming(
                 /* on-demand html render: the tick path is text-only, so a
                    fresh watch renders full html once here. Empty cache
                    (stale daemon, raced attach) falls back to a direct
-                   daemon read instead of sending a blank view. */
-                let (text, html) = match app
-                    .state::<crate::pty::PtyManager>()
-                    .snapshot_html(pid)
-                {
+                   daemon read instead of sending a blank view.
+                   snapshot_html waits on the daemon for up to
+                   REQUEST_TIMEOUT, so it runs on the blocking pool: a
+                   stalled daemon must not tie up a runtime worker. */
+                let pid_owned = pid.to_string();
+                let app_owned = app.clone();
+                let snap = tauri::async_runtime::spawn_blocking(move || {
+                    app_owned
+                        .state::<crate::pty::PtyManager>()
+                        .snapshot_html(&pid_owned)
+                })
+                .await
+                .ok()
+                .flatten();
+                let (text, html) = match snap {
                     /* fresh full render wins: cache can hold a text-only tick
                        snapshot whose html is still empty */
                     Some(s) if !s.html.is_empty() => {

@@ -17,6 +17,8 @@ import api from '../../preload/bentomux';
 let info: RemotePairing | null = null;
 let fetched = false;
 let panel: HTMLElement | null = null;
+let pollTimer = 0;
+let pollAttempt = 0;
 
 function syncSeg(seg: HTMLElement, onIndex: 0 | 1): void {
   const [first, second] = seg.children as HTMLCollectionOf<HTMLElement>;
@@ -35,15 +37,31 @@ async function refresh(): Promise<void> {
   if (panel) paintPanel();
 }
 
-function pollTunnel(attempt = 0): void {
-  /* the trycloudflare URL arrives asynchronously from cloudflared's stderr (takes ~6s) */
-  if (attempt >= 30 || info?.tunnelUrl || info?.tunnelError) return;
-  window.setTimeout(() => {
-    void refresh().then(() => pollTunnel(attempt + 1));
+/* the trycloudflare URL arrives asynchronously from cloudflared's stderr (takes ~6s) */
+
+/* Single-flight poller. The previous shape started a fresh chain from paintPanel,
+   which every tick repaints, so while a tunnel was starting the number of live
+   1s poll chains doubled every second — thousands of synchronous remote_info
+   invokes hammering the main thread, which is the app "hanging" on remote-on.
+   paintPanel may call this on every repaint; it stays one chain either way. */
+function ensurePolling(): void {
+  if (pollTimer) return;
+  const waiting = !!info?.running && !info.urls.length && !info.tunnelError && !info.error;
+  if (!waiting || pollAttempt >= 30) { pollAttempt = 0; return; }
+  pollTimer = window.setTimeout(() => {
+    pollTimer = 0;
+    pollAttempt += 1;
+    void refresh().then(ensurePolling);
   }, 1000);
 }
 
+function stopPolling(): void {
+  pollAttempt = 0;
+  if (pollTimer) { window.clearTimeout(pollTimer); pollTimer = 0; }
+}
+
 async function applyEnabled(on: boolean): Promise<void> {
+  if (!on) stopPolling();
   try {
     info = await api.remoteSetEnabled(on);
   } catch (e) {
@@ -51,7 +69,7 @@ async function applyEnabled(on: boolean): Promise<void> {
   }
   updateDockDot();
   if (panel) paintPanel();
-  if (on && info?.enabled && !info.tunnelUrl && !info.tunnelError) pollTunnel();
+  ensurePolling();
 }
 
 /* ---------------- dock button (rendered on every sidebar render) ---------------- */
@@ -170,9 +188,7 @@ function paintPanel(): void {
       /* tunnel URL hasn't arrived yet (cloudflared stderr is async) */
       body.append(h('div', { class: 'settings-hint' }, info.running ? 'Starting secure tunnel…' : 'Starting…'));
     }
-    if (info.running && !info.urls.length && !info.tunnelError && !info.error) {
-      void pollTunnel();
-    }
+    ensurePolling();
     body.append(h('div', { class: 'settings-hint' },
       'Local server is loopback-only (http://127.0.0.1) — reachable from this machine. The pairing URL above is public HTTPS (CA-signed, no browser warning). Traffic is relayed through Cloudflare and requires the pairing token.'));
   }
