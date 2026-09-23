@@ -484,6 +484,12 @@ async function loadInitialBranches(): Promise<void> {
 let statusAudio: AudioContext | null = null;
 const lastAgentStates: Record<string, string | null | undefined> = {};
 
+/* Global error handler: catch unhandled promise rejections so UI failures
+   are visible instead of silently breaking plugin views. */
+window.addEventListener('unhandledrejection', e => {
+  console.error('[unhandled-rejection]', e.reason);
+});
+
 async function playAgentStatusSound(kind: 'finished' | 'blocked' | 'idle'): Promise<void> {
   if (db.prefs.notifEnabled === false || db.prefs.notifSound === false) return;
   const AudioCtor = window.AudioContext ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
