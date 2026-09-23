@@ -17,7 +17,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2.1", features = ["macos-private-api"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["net", "sync", "rt", "rt-multi-thread", "macros", "time", "io-util", "io-std"] }
 portable-pty = "0.8"
 sysinfo = "0.32"
 notify = "7.0"

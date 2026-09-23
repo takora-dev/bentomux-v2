@@ -14,7 +14,21 @@ fn screens() -> &'static Mutex<HashMap<String, TerminalSnapshot>> {
 }
 
 pub fn update_snapshot(id: &str, snapshot: TerminalSnapshot) {
-    screens().lock().unwrap().insert(id.to_string(), snapshot);
+    let mut guard = screens().lock().unwrap();
+    match guard.get_mut(id) {
+        /* hot tick carries text+meta only (see terminal.rs snapshot()): keep
+           the cached html from the last explicit render so the remote mirror
+           does not go blank between watched renders */
+        Some(cur) if snapshot.html.is_empty() => {
+            cur.text = snapshot.text;
+            cur.title = snapshot.title;
+            cur.progress = snapshot.progress;
+            cur.last_data_at = snapshot.last_data_at;
+        }
+        _ => {
+            guard.insert(id.to_string(), snapshot);
+        }
+    }
 }
 
 pub fn clear_snapshot(id: &str) {

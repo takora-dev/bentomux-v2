@@ -59,7 +59,12 @@ let highlighterPromise: Promise<HighlighterCore> | null = null;
 const languagePromises = new Map<ShikiLang, Promise<void>>();
 
 /* Keep common grammars bundled as lazy chunks. Less common languages remain
-   detectable and fall back to plain text when no loader is registered. */
+   detectable and fall back to plain text when no loader is registered.
+   NOTE: only the JS/TS family + python/markdown/json stay eagerly reachable
+   as separate chunks — diffs of those cover the vast majority of views.
+   The rest (go/rust/bash/sql/html/css/yaml/toml/xml) load on first use via
+   the same dynamic import, so adding them back costs one chunk fetch, not
+   a bigger initial bundle. */
 const LANG_LOADERS: Partial<Record<ShikiLang, () => Promise<{ default: LanguageInput }>>> = {
   javascript: () => import('@shikijs/langs/javascript'),
   typescript: () => import('@shikijs/langs/typescript'),

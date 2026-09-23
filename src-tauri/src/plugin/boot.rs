@@ -37,11 +37,13 @@ pub struct BootReport {
 
 /// Called once during setup, before the webview loads. Increments the
 /// counter and decides whether this session runs in safe mode.
+/// Synchronous write-through: a crash between boot and first paint must not
+/// lose the attempt, or the safe-mode counter never engages.
 pub fn begin_boot(mgr: &AppStateManager, requested: bool) -> BootReport {
     let mut attempts = 0u32;
-    mgr.patch_prefs(|p| {
-        let next = p.boot_attempts.unwrap_or(0).saturating_add(1);
-        p.boot_attempts = Some(next);
+    mgr.patch_state_sync(|s| {
+        let next = s.prefs.boot_attempts.unwrap_or(0).saturating_add(1);
+        s.prefs.boot_attempts = Some(next);
         attempts = next;
     });
 

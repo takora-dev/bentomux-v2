@@ -411,11 +411,11 @@ fn match_agent(name: &str, cmd: Option<&str>) -> Option<&'static str> {
     None
 }
 
-fn snapshot() -> Vec<Proc> {
+fn snapshot(sys: &mut System) -> Vec<Proc> {
     /* Runtime detection needs parent, name, and command only. Avoid refreshing
        CPU, memory, disk, cwd, environment, and executable metadata for every
-       process on each tick. */
-    let mut sys = System::new();
+       process on each tick. The System instance is reused across ticks so the
+       process table is refreshed in place instead of re-enumerated. */
     sys.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
@@ -545,17 +545,29 @@ pub fn init(app: tauri::AppHandle) {
 
     /* the PTY daemon owns the authoritative terminal parser and publishes
        immutable snapshots; runtime only evaluates the cached snapshots. */
-    /* per-tab runtime poller */
+    /* per-tab runtime poller. Base cadence stays 1s so status dots feel
+       live, but idle machines back off to 5s: sysinfo refresh + tree walk +
+       manifest eval per tick is the hottest backend loop in the app. */
+    const BASE_TICK_MS: u64 = 1000;
+    const IDLE_TICK_MS: u64 = 5000;
     std::thread::spawn(move || {
-        let mut last_json = String::new();
+        let mut sys = System::new();
+        let mut last_statuses: BTreeMap<String, RuntimeStatus> = BTreeMap::new();
+        let mut idle_ticks: u32 = 0;
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(1000));
             let terms = app.state::<PtyManager>().live_terms();
             if terms.is_empty() {
-                publish(&BTreeMap::new());
+                if !last_statuses.is_empty() {
+                    last_statuses = BTreeMap::new();
+                    publish(&last_statuses);
+                }
+                idle_ticks = idle_ticks.saturating_add(1);
+                std::thread::sleep(std::time::Duration::from_millis(
+                    if idle_ticks >= 3 { IDLE_TICK_MS } else { BASE_TICK_MS },
+                ));
                 continue;
             }
-            let procs = snapshot();
+            let procs = snapshot(&mut sys);
             let mut by_parent: HashMap<u32, Vec<&Proc>> = HashMap::new();
             for p in &procs {
                 by_parent.entry(p.ppid).or_default().push(p);
@@ -570,12 +582,19 @@ pub fn init(app: tauri::AppHandle) {
                 statuses.insert(t.id.clone(), st);
             }
             /* match the Electron change-detection: only publish a new frame
-               when the serialized payload differs */
-            let json = serde_json::to_string(&statuses).unwrap_or_default();
-            if json != last_json {
-                last_json = json;
+               when the payload differs. BTreeMap<RuntimeStatus> derives
+               PartialEq, so compare structs directly instead of serializing
+               the whole map to JSON on every tick. */
+            if statuses != last_statuses {
+                last_statuses = statuses.clone();
+                idle_ticks = 0;
                 publish(&statuses);
+            } else {
+                idle_ticks = idle_ticks.saturating_add(1);
             }
+            std::thread::sleep(std::time::Duration::from_millis(
+                if idle_ticks >= 5 { IDLE_TICK_MS } else { BASE_TICK_MS },
+            ));
         }
     });
 }

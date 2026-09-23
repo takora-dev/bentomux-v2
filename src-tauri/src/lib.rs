@@ -232,6 +232,14 @@ pub fn run() {
                 bridge::stop_bridge();
                 crate::remote::stop_tunnel();
                 crate::remote::stop_remote();
+                /* flush the debounced state writer: the last ~400 ms of
+                   patches would otherwise never reach bentomux.json */
+                {
+                    use tauri::Manager;
+                    if let Some(mgr) = _app.try_state::<crate::state::AppStateManager>() {
+                        mgr.flush();
+                    }
+                }
             }
         });
 }

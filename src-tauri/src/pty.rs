@@ -23,6 +23,12 @@ use crate::state::{TabRec, WorkspaceRec};
 /* a spawn that never gets answered means the daemon died mid-request */
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
+/* Coalesce pty:data emits: busy agents produce many small daemon lines per
+   frame, and each app.emit is an IPC serialize+post into the WebView. Buffer
+   per pane and flush at ~60 Hz so one burst costs one emit. */
+const PTY_FLUSH_MS: u64 = 16;
+const PTY_MAX_BUFFER: usize = 256 * 1024;
+
 /* snapshot of a term's identity for callers that don't need the handles */
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -200,6 +206,32 @@ impl PtyManager {
         let exit_tx = self.exit_tx.clone();
         let app = self.app.clone();
         let out_slot = self.out.clone();
+        /* per-pane coalescing buffers, flushed on a 16 ms cadence by the
+           flusher thread below. data_tx (remote dirty-set, tests) still
+           gets every chunk immediately — only the WebView emit batches. */
+        let coalesce: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let flush_buffers = coalesce.clone();
+        let flush_app = app.clone();
+        let flush_data = data_tx.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(PTY_FLUSH_MS));
+            let batch: Vec<(String, String)> = {
+                let mut guard = flush_buffers.lock().unwrap();
+                if guard.is_empty() {
+                    continue;
+                }
+                guard.drain().collect()
+            };
+            for (id, chunk) in batch {
+                let _ = flush_data.send((id.clone(), chunk.clone()));
+                if let Some(app) = &flush_app {
+                    let _ = app.emit("pty:data", (id, chunk));
+                }
+            }
+            if flush_app.is_none() && flush_data.receiver_count() == 0 {
+                break;
+            }
+        });
         std::thread::spawn(move || {
             let mut reader = reader;
             let mut line = String::new();
@@ -216,9 +248,20 @@ impl PtyManager {
                     "data" => {
                         let Some(bytes) = msg.get("data").and_then(Value::as_str).and_then(unb64) else { continue };
                         let chunk = String::from_utf8_lossy(&bytes).into_owned();
-                        let _ = data_tx.send((id.clone(), chunk.clone()));
-                        if let Some(app) = &app {
-                            let _ = app.emit("pty:data", (id, chunk));
+                        /* coalesce before the WebView emit; data_tx fans out
+                           from the flusher so ordering per pane is preserved */
+                        let mut guard = coalesce.lock().unwrap();
+                        let entry = guard.entry(id.clone()).or_default();
+                        if entry.len() + chunk.len() > PTY_MAX_BUFFER {
+                            let pending = std::mem::take(entry);
+                            drop(guard);
+                            let _ = data_tx.send((id.clone(), pending.clone()));
+                            if let Some(app) = &app {
+                                let _ = app.emit("pty:data", (id.clone(), pending));
+                            }
+                            coalesce.lock().unwrap().insert(id, chunk);
+                        } else {
+                            entry.push_str(&chunk);
                         }
                     }
                     "snapshot" => {
@@ -310,6 +353,23 @@ impl PtyManager {
             return Err(message.to_string());
         }
         Ok(reply)
+    }
+
+    /* on-demand full snapshot (text+html) for a pane, bypassing the cache.
+       Used by the remote mirror on watch: the 500 ms hot tick is text-only,
+       so a fresh watcher renders html once via the daemon directly. */
+    pub fn snapshot_html(&self, id: &str) -> Option<crate::terminal::TerminalSnapshot> {
+        let reply = self.request(json!({ "t": "snapshot-html", "id": id })).ok()?;
+        if reply.get("t").and_then(Value::as_str) != Some("snapshot") {
+            return None;
+        }
+        Some(crate::terminal::TerminalSnapshot {
+            text: reply.get("text").and_then(Value::as_str).unwrap_or_default().to_string(),
+            html: reply.get("html").and_then(Value::as_str).unwrap_or_default().to_string(),
+            title: reply.get("title").and_then(Value::as_str).unwrap_or_default().to_string(),
+            progress: reply.get("progress").and_then(Value::as_str).unwrap_or_default().to_string(),
+            last_data_at: reply.get("lastDataAt").and_then(Value::as_u64).unwrap_or(0),
+        })
     }
 
     /* ask the daemon to start streaming a pane, replaying its screen buffer */

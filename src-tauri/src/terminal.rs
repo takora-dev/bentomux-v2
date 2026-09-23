@@ -69,6 +69,24 @@ impl TerminalModel {
 
     pub fn snapshot(&self) -> TerminalSnapshot {
         TerminalSnapshot {
+            text: self.text(),
+            /* html is the expensive half of a snapshot (per-cell style walk
+               over the whole grid). Consumers that need it (remote mirror)
+               ask explicitly via snapshot_html(); the 500 ms hot tick must
+               not pay for it on panes nobody watches. */
+            html: String::new(),
+            title: self.title.clone(),
+            progress: self.progress.clone(),
+            last_data_at: self.last_data_at,
+        }
+    }
+
+    pub fn text(&self) -> String {
+        self.term.screen().contents()
+    }
+
+    pub fn snapshot_html(&self) -> TerminalSnapshot {
+        TerminalSnapshot {
             text: self.term.screen().contents(),
             html: screen_dump_html(&self.term),
             title: self.title.clone(),
@@ -314,6 +332,9 @@ mod tests {
         assert!(snap.text.contains("ready"));
         model.set_size(24, 200);
         model.process("x".repeat(150).as_bytes());
-        assert!(model.snapshot().html.contains(&"x".repeat(150)));
+        assert!(model.snapshot_html().html.contains(&"x".repeat(150)));
+        /* the hot tick snapshot skips html: runtime detection reads text,
+           title, and progress only */
+        assert!(model.snapshot().html.is_empty());
     }
 }

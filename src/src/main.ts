@@ -10,7 +10,7 @@ import { ui, type Route, type TabEntry } from './state';
 import { db, setDb, branches, runtime, activity } from './store';
 import { registerRenderers, render } from './render';
 import { renderTabs, activate, stepHistory, registerRestoredTab } from './views/tabs';
-import { addWorkspaceFlow, renderSidebar, toggleGitPanel } from './views/sidebar';
+import { addWorkspaceFlow, renderSidebar, patchPaneStatuses, toggleGitPanel } from './views/sidebar';
 import { agentsPage, agentDetailPage } from './views/agents';
 import { welcomePage, disposeWidgets } from './views/welcome';
 import {
@@ -20,9 +20,7 @@ import {
   clearTerminalSelections,
 } from './views/terminal';
 import { initKeyboard } from './keyboard';
-import { diffPage } from './views/diff';
-import { commitPage } from './views/commit';
-import { refreshChangesPill } from './views/gitPanel';
+import { refreshChangesPill, startPillHeartbeat } from './views/gitPanel';
 import { initAgentEvents } from './views/agent-events';
 import { initAutoUpdate, updateStatus, onUpdateChange } from './updates';
 import { topbarEntries, tabRenderer, modalRenderer } from './plugin/registry';
@@ -110,13 +108,25 @@ function renderContentInner(route: Route): void {
     body.innerHTML = '';
     body.append(agentDetailPage(route.agentId, route.tab));
   } else if (route.view === 'diff') {
+    /* shiki (core + grammars, ~1.3 MB) loads lazily with the diff view —
+       never part of first paint. Plain loading text holds the slot. */
     c.classList.add('fullbleed');
     body.innerHTML = '';
-    body.append(diffPage(route.workspaceId, route.path));
+    body.append(h('div', { class: 'page' }, h('p', {}, 'Loading diff…')));
+    void import('./views/diff').then(m => {
+      if (ui.route.view !== 'diff') return;
+      body.innerHTML = '';
+      body.append(m.diffPage(route.workspaceId, route.path));
+    });
   } else if (route.view === 'commit') {
     c.classList.add('fullbleed');
     body.innerHTML = '';
-    body.append(commitPage(route.workspaceId, route.oid, route.short));
+    body.append(h('div', { class: 'page' }, h('p', {}, 'Loading commit…')));
+    void import('./views/commit').then(m => {
+      if (ui.route.view !== 'commit') return;
+      body.innerHTML = '';
+      body.append(m.commitPage(route.workspaceId, route.oid, route.short));
+    });
   } else if (route.view === 'plugin') {
     /* a plugin tab renders into a host element it is given. The renderer is
        looked up fresh each paint: the plugin may have been reloaded since the
@@ -450,13 +460,10 @@ registerRenderers({ root: renderRoot, content: renderContentInner, sidebar: rend
 
 /* ---------------- clock: refresh relative times ---------------- */
 
-/* poll Changes pill every 5 s so +N -N stays accurate as files change,
-   even when the git panel is closed */
-setInterval(() => {
-  /* while the panel is open its own 4s poll already repaints the pill, so
-     polling here too would race two git processes at the same numstat */
-  if (!ui.gitPanelOpen) void refreshChangesPill();
-}, 5000);
+/* The Changes-pill heartbeat lives in gitPanel.ts (startPillHeartbeat): 15 s,
+   stood down while the panel's own 4 s poll covers the active workspace, and
+   skipped while the tab is hidden. */
+startPillHeartbeat();
 
 setInterval(() => {
   $$('[data-ts]').forEach(el => {
@@ -510,13 +517,27 @@ function notifyAgentTransition(id: string, state: string | null | undefined): vo
 
 
 function subscribeRuntime(): void {
+  /* Runtime ticks arrive ~1 Hz per backend change. A full renderSidebar()
+     rebuilds the whole nav each time; patch the status rows in place and
+     only fall back to a full render when the pane set itself changed. */
+  let pending: ReturnType<typeof setTimeout> | null = null;
   api.onRuntimeStatus(statuses => {
+    let structureChanged = false;
     for (const [id, st] of Object.entries(statuses)) {
       notifyAgentTransition(id, st.state);
+      if (!(id in runtime)) structureChanged = true;
       runtime[id] = st;
       if (st.running) activity[id] = Date.now();
     }
-    renderSidebar();
+    for (const id of Object.keys(runtime)) {
+      if (!(id in statuses)) { delete runtime[id]; structureChanged = true; }
+    }
+    if (structureChanged) { renderSidebar(); return; }
+    if (pending !== null) return;
+    pending = setTimeout(() => {
+      pending = null;
+      if (!patchPaneStatuses()) renderSidebar();
+    }, 100);
   });
 }
 
@@ -611,19 +632,13 @@ async function boot(): Promise<void> {
   subscribeRuntime();
   initAgentEvents();
 
-  /* restore last session's tabs as fresh shells */
+  /* restore last session's tabs as fresh shells. Awaited: tab registration
+     must land before the first paint or the initial route is empty. */
   const restored = await api.restoreTabs();
   for (const rec of restored) {
     registerRestoredTab(rec);
     activity[rec.id] = Date.now();
   }
-
-  /* initial branch cache */
-  await loadInitialBranches();
-
-  /* initial Changes pill — fetches diff stat for the active workspace so
-     the +N -N in the titlebar is accurate before the user opens the panel */
-  await refreshChangesPill();
 
   wireAppBar();
   initKeyboard();
@@ -631,6 +646,12 @@ async function boot(): Promise<void> {
   restoreInitialView(restored);
   logSmokeIfRequested();
   console.info('[perf] renderer-boot-ms=' + Math.round(performance.now() - bootStart));
+
+  /* everything below is deferred past first paint: branch names, the Changes
+     pill, and plugin activation each cost IPC git spawns. They fill in
+     within a beat without blocking the shell. */
+  void loadInitialBranches().then(() => renderSidebar());
+  void refreshChangesPill();
 
   /* Plugins come last, and deliberately: their activation must not delay the
      shell's first paint. Services start here too, once the window is

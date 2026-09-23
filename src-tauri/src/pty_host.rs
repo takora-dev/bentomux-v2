@@ -40,7 +40,7 @@ pub const HOST_FLAG: &str = "--pty-host";
    daemon that answers with a different number: a daemon outlives app updates,
    so a silent mismatch would surface as confusing misbehaviour in the field
    with nothing to diagnose it. */
-pub const PROTOCOL_VERSION: u64 = 3;
+pub const PROTOCOL_VERSION: u64 = 5;
 
 
 /* how long to wait for the freshly spawned daemon to accept a connection */
@@ -331,15 +331,21 @@ fn encoded_data_line(id: &str, bytes: &[u8]) -> String {
 }
 
 fn send_snapshot(host: &Host, id: &str, snapshot: &crate::terminal::TerminalSnapshot) {
-    send_json(host, json!({
+    /* html goes over the wire only when rendered (watched panes / attach /
+       resize). The 500 ms hot tick sends text+meta so runtime detection stays
+       live without the per-cell style walk or the extra IPC bytes. */
+    let mut obj = json!({
         "t": "snapshot",
         "id": id,
         "text": snapshot.text,
-        "html": snapshot.html,
         "title": snapshot.title,
         "progress": snapshot.progress,
         "lastDataAt": snapshot.last_data_at,
-    }));
+    });
+    if !snapshot.html.is_empty() {
+        obj["html"] = snapshot.html.clone().into();
+    }
+    send_json(host, obj);
 }
 
 fn term_list(host: &Host) -> Value {
@@ -412,10 +418,37 @@ fn handle_line(host: &Arc<Host>, line: &str) {
                     shared.attached.store(true, Ordering::SeqCst);
                 }
                 /* Detection snapshot is independent of xterm replay ordering;
-                   render it after releasing the hot stream gate. */
-                let snapshot = shared.terminal.lock().unwrap().snapshot();
+                   render it after releasing the hot stream gate. Attach needs
+                   full html (remote may already watch this pane); the hot
+                   tick afterwards sends text-only. */
+                let snapshot = shared.terminal.lock().unwrap().snapshot_html();
                 shared.last_snapshot_at.store(now_ms(), Ordering::Relaxed);
                 send_snapshot(host, &shared.id, &snapshot);
+            }
+        }
+        "snapshot-html" => {
+            /* on-demand full render for the remote mirror's watch path.
+               The 500 ms hot tick is text-only; a fresh watcher pays for
+               the per-cell style walk exactly once here. */
+            if let Some(shared) = host.terms.lock().unwrap().get(&id).map(|t| t.shared.clone()) {
+                let snapshot = shared.terminal.lock().unwrap().snapshot_html();
+                let mut obj = json!({
+                    "t": "snapshot",
+                    "id": id,
+                    "text": snapshot.text,
+                    "html": snapshot.html,
+                    "title": snapshot.title,
+                    "progress": snapshot.progress,
+                    "lastDataAt": snapshot.last_data_at,
+                });
+                if n != 0 {
+                    if let Some(o) = obj.as_object_mut() {
+                        o.insert("n".to_string(), json!(n));
+                    }
+                }
+                send_json(host, obj);
+            } else if n != 0 {
+                reply(host, n, json!({ "t": "error", "id": id, "message": "unknown pane" }));
             }
         }
         "write" => {
@@ -437,7 +470,9 @@ fn handle_line(host: &Arc<Host>, line: &str) {
                     term.shared.terminal.lock().unwrap().set_size(rows, cols);
                     let _ = term.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
                 }
-                let snapshot = term.shared.terminal.lock().unwrap().snapshot();
+                /* resize reflows the grid: text-only would leave a watching
+                   phone with a stale render until the next output */
+                let snapshot = term.shared.terminal.lock().unwrap().snapshot_html();
                 term.shared.last_snapshot_at.store(now_ms(), Ordering::Relaxed);
                 send_snapshot(host, &term.shared.id, &snapshot);
             }

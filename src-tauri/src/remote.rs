@@ -521,8 +521,25 @@ async fn handle_incoming(
                     return;
                 }
                 *pane_id.lock().unwrap() = Some(pid.to_string());
-                let html = crate::detect::screen::screen_dump_html(pid);
-                let text = crate::detect::screen::screen_dump(pid);
+                /* on-demand html render: the tick path is text-only, so a
+                   fresh watch renders full html once here. Empty cache
+                   (stale daemon, raced attach) falls back to a direct
+                   daemon read instead of sending a blank view. */
+                let (text, html) = match app
+                    .state::<crate::pty::PtyManager>()
+                    .snapshot_html(pid)
+                {
+                    /* fresh full render wins: cache can hold a text-only tick
+                       snapshot whose html is still empty */
+                    Some(s) if !s.html.is_empty() => {
+                        crate::detect::screen::update_snapshot(pid, s.clone());
+                        (s.text, s.html)
+                    }
+                    _ => (
+                        crate::detect::screen::screen_dump(pid),
+                        crate::detect::screen::screen_dump_html(pid),
+                    ),
+                };
                 let body = js(&json!({"t": "view", "paneId": pid, "text": text, "html": html}));
                 let _ = sender.send(Message::Text(body)).await;
             }
@@ -621,13 +638,17 @@ fn broadcast(msg: RemoteMsg) {
 }
 
 fn broadcast_view(pane_id: &str, text: &str) {
-    let html = crate::detect::screen::screen_dump_html(pane_id);
-    broadcast(RemoteMsg::View { pane_id: pane_id.to_string(), text: text.to_string(), html });
+    /* text-only on the tick path: html is rendered on demand when a phone
+       actually watches the pane (handle_incoming "watch"), not for every
+       dirty pane every 250 ms */
+    broadcast(RemoteMsg::View { pane_id: pane_id.to_string(), text: text.to_string(), html: String::new() });
 }
 
-/* serialize each watched, recently-active pane once per tick */
-fn push_dirty(dirty: &Arc<Mutex<Vec<String>>>) {
-    let pending: Vec<String> = dirty.lock().unwrap().drain(..).collect();
+/* serialize each dirty pane once per tick. HashSet dedups: a busy pane fires
+   on_term_data many times per 250 ms window, and the old Vec pushed one
+   entry per event — same pane serialized N times per tick. */
+fn push_dirty(dirty: &Arc<Mutex<std::collections::HashSet<String>>>) {
+    let pending: Vec<String> = dirty.lock().unwrap().drain().collect();
     for pane_id in pending {
         broadcast_view(&pane_id, &crate::detect::screen::screen_dump(&pane_id));
     }
@@ -692,8 +713,8 @@ pub fn start_remote(app: &tauri::AppHandle, state: &AppStateManager) {
     };
     *last_error().lock().unwrap() = None;
 
-    let (out_tx, _) = tokio::sync::broadcast::channel::<RemoteMsg>(64);
-    let dirty: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let (out_tx, _) = tokio::sync::broadcast::channel::<RemoteMsg>(256);
+    let dirty: Arc<Mutex<std::collections::HashSet<String>>> = Arc::new(Mutex::new(std::collections::HashSet::new()));
     let running = Arc::new(AtomicBool::new(true));
     let (kill_tx, kill_rx) = tokio::sync::watch::channel(false);
     *current_out().lock().unwrap() = Some(out_tx.clone());
@@ -713,7 +734,7 @@ pub fn start_remote(app: &tauri::AppHandle, state: &AppStateManager) {
         let mut rx = app1.state::<crate::pty::PtyManager>().on_term_data();
         loop {
             match rx.recv().await {
-                Ok((id, _)) => d1.lock().unwrap().push(id),
+                Ok((id, _)) => { d1.lock().unwrap().insert(id); }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(_) => return,
             }
@@ -726,7 +747,7 @@ pub fn start_remote(app: &tauri::AppHandle, state: &AppStateManager) {
         loop {
             match rx.recv().await {
                 Ok((id, _)) => {
-                    d2.lock().unwrap().retain(|p| p != &id);
+                    d2.lock().unwrap().remove(&id);
                     broadcast(RemoteMsg::Json(js(&json!({"t": "panes", "panes": pane_list(&app2)}))));
                     broadcast(RemoteMsg::Gone { pane_id: id });
                 }

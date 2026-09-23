@@ -18,13 +18,36 @@ import { closeContextMenu, contextMenuAnchoredTo, openContextMenu, type MenuEntr
 import { openSearchModal } from './search';
 import { openSettingsModal } from './settings';
 import { remoteDockButton } from './remote';
-import { gitPanelPage, refreshChangesPill } from './gitPanel';
+import { gitPanelPage, notifyPanelPolling, refreshChangesPill } from './gitPanel';
 import { dockEntries, sidebarEntries } from '../plugin/registry';
 import { ensureActive, pluginAssetUrl } from '../plugin/loader';
 import { contributionIcon, contributionLabel } from '../plugin/icons';
 import api from '../../preload/bentomux';
 
 const PANE_INDENT = 24;
+
+/* Patch pane status rows in place for the ~1 Hz runtime-status ticks.
+   A full renderSidebar() rebuilds the whole nav (search, workspaces, dock)
+   on every tick; this only touches the status/agent spans whose values
+   actually changed. Returns true when every changed pane was patched. */
+export function patchPaneStatuses(): boolean {
+  let patched = true;
+  for (const btn of $$('#nav button.workspace-child[data-pane]')) {
+    const paneId = (btn as HTMLElement).dataset.pane;
+    if (!paneId) continue;
+    const st = runtime[paneId];
+    const status = st?.state ?? (st?.running ? 'working' : 'idle');
+    const agent = st?.runtime || 'shell';
+    const statusEl = btn.querySelector('.agent-status');
+    const agentEl = statusEl?.nextElementSibling?.nextElementSibling;
+    if (!statusEl || !(agentEl instanceof HTMLElement)) { patched = false; continue; }
+    const wantClass = 'agent-status ' + status;
+    if (statusEl.className !== wantClass) statusEl.className = wantClass;
+    if (statusEl.textContent !== status) statusEl.textContent = status;
+    if (agentEl.textContent !== agent) agentEl.textContent = agent;
+  }
+  return patched;
+}
 
 /* Pointer drag state. HTML5 drag/drop is unreliable inside Tauri WebView. */
 let dragWsId: string | null = null;
@@ -614,6 +637,7 @@ function renderGitPanel(): void {
     /* drop the mounted panel so re-opening fetches instead of showing the
        snapshot from the previous time the panel was up */
     slot.innerHTML = '';
+    notifyPanelPolling(false);
     return;
   }
   /* gitPanelPage() returns the same node while the active workspace is

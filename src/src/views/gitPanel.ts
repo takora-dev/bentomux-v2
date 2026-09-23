@@ -34,6 +34,26 @@ interface PanelState {
 /* the panel is mounted once per (open, workspace) pair and then polls itself,
    so the sidebar's 1 Hz re-render no longer re-runs the git shellouts */
 const PANEL_POLL_MS = 4000;
+const PILL_POLL_MS = 15000;
+
+/* Shared pill/panel scheduler: the titlebar pill heartbeat stands down while
+   the panel's own poll covers the active workspace, so the two never race
+   two git processes at the same numstat. */
+let panelPolling = false;
+let pillTimer: ReturnType<typeof setInterval> | null = null;
+
+export function notifyPanelPolling(active: boolean): void {
+  panelPolling = active;
+}
+
+export function startPillHeartbeat(): void {
+  if (pillTimer !== null) return;
+  pillTimer = setInterval(() => {
+    if (ui.gitPanelOpen || panelPolling) return;
+    if (document.visibilityState !== 'visible') return;
+    void refreshChangesPill();
+  }, PILL_POLL_MS);
+}
 
 function activeWsId(): string | null {
   return db.activeWorkspaceId;
@@ -305,11 +325,18 @@ export function gitPanelPage(): HTMLElement {
   void refresh(state, paint);
 
   /* the panel owns its own freshness now that it is not re-mounted: slow poll
-     while it is on screen, self-clearing once the sidebar drops the node */
+     while it is on screen, self-clearing once the sidebar drops the node.
+     Skipped while the tab is hidden — git output cannot change what the user
+     sees, and each tick costs process spawns. */
   const poll = window.setInterval(() => {
-    if (!root.isConnected) { window.clearInterval(poll); return; }
+    if (!root.isConnected) { window.clearInterval(poll); notifyPanelPolling(false); return; }
+    if (document.visibilityState !== 'visible') return;
     void refresh(state, paint, { silent: true });
   }, PANEL_POLL_MS);
+
+  /* notify the shared scheduler so the titlebar pill can stand down while
+     the panel's own poll covers the active workspace */
+  notifyPanelPolling(true);
 
   return root;
 }

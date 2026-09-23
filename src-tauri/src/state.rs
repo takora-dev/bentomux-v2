@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::plugin::PluginRecord;
 use crate::split_tree::{first_leaf_id, tree_from_legacy, Dir, PaneNode};
@@ -346,8 +347,25 @@ impl AppStateManager {
         self.state.lock().unwrap().clone()
     }
 
-    /* every mutation goes through here so each change is persisted */
+    /* every mutation goes through here so each change is persisted.
+       Writes are debounced: rapid patch bursts (drag, typing prefs, tab
+       churn) coalesce into one disk write instead of one tmp+backup+rename
+       cycle per call. */
     pub fn patch_state<F>(&self, updater: F) -> AppState
+    where
+        F: FnOnce(&mut AppState),
+    {
+        let mut state = self.state.lock().unwrap();
+        updater(&mut state);
+        let snapshot = state.clone();
+        drop(state);
+        schedule_persist(self.path.clone(), snapshot);
+        self.state.lock().unwrap().clone()
+    }
+
+    /* synchronous write-through for paths where losing the write is worse
+       than the disk cost: boot counter, tests, shutdown */
+    pub fn patch_state_sync<F>(&self, updater: F) -> AppState
     where
         F: FnOnce(&mut AppState),
     {
@@ -355,6 +373,16 @@ impl AppStateManager {
         updater(&mut state);
         persist(&self.path, &state);
         state.clone()
+    }
+
+    /* blocking flush for paths that must not lose data (tests, shutdown) */
+    pub fn flush(&self) {
+        if let Some(p) = pending().lock().unwrap().take() {
+            persist(&p.path, &p.state);
+            return;
+        }
+        let st = self.state.lock().unwrap().clone();
+        persist(&self.path, &st);
     }
 
     pub fn patch_prefs<F>(&self, updater: F) -> AppState
@@ -446,19 +474,87 @@ fn adopt(state: &mut AppState, raw: &serde_json::Value) {
     *state = patched;
 }
 
+/* debounced persist: first patch in a burst writes through after
+   PERSIST_DEBOUNCE_MS; further patches inside the window only refresh the
+   pending snapshot, so N rapid patches cost 1 disk write. Backup rotation
+   is hourly, not per-write. */
+const PERSIST_DEBOUNCE_MS: u64 = 400;
+const BACKUP_INTERVAL: Duration = Duration::from_secs(3600);
+
+struct PendingPersist {
+    path: PathBuf,
+    state: AppState,
+    at: Instant,
+}
+
+fn pending() -> &'static Mutex<Option<PendingPersist>> {
+    static PENDING: OnceLock<Mutex<Option<PendingPersist>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(None))
+}
+
+fn last_backup_at() -> &'static Mutex<Option<Instant>> {
+    static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    LAST.get_or_init(|| Mutex::new(None))
+}
+
+fn schedule_persist(path: PathBuf, state: AppState) {
+    let due = {
+        let mut guard = pending().lock().unwrap();
+        let first = guard.is_none();
+        *guard = Some(PendingPersist { path: path.clone(), state, at: Instant::now() });
+        first
+    };
+    if !due {
+        return;
+    }
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(PERSIST_DEBOUNCE_MS));
+        loop {
+            let next = {
+                let guard = pending().lock().unwrap();
+                match guard.as_ref() {
+                    Some(p) if p.at.elapsed() >= Duration::from_millis(PERSIST_DEBOUNCE_MS) => {
+                        drop(guard);
+                        pending().lock().unwrap().take()
+                    }
+                    _ => None,
+                }
+            };
+            match next {
+                Some(p) => persist(&p.path, &p.state),
+                None => {
+                    std::thread::sleep(Duration::from_millis(PERSIST_DEBOUNCE_MS));
+                    if pending().lock().unwrap().is_none() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+}
+
 /* atomic-ish write: tmp file → backup → rename, like the Electron persist() */
 fn persist(path: &Path, state: &AppState) {
     let write = || -> Result<(), String> {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).map_err(|e| format!("mkdir failed: {}", e))?;
         }
-        let json = serde_json::to_string_pretty(state)
+        /* compact JSON: pretty-printing costs bytes + time on every one of
+           the 44 patch_state call sites, and nothing reads this file by hand */
+        let json = serde_json::to_string(state)
             .map_err(|e| format!("serialize failed: {}", e))?;
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, json).map_err(|e| format!("write failed: {}", e))?;
         if path.exists() {
-            let bak = path.with_extension("json.bak");
-            fs::rename(path, &bak).map_err(|e| format!("backup failed: {}", e))?;
+            /* hourly backup rotation instead of a rename on every write:
+               same crash safety, far fewer directory ops under patch bursts */
+            let mut last = last_backup_at().lock().unwrap();
+            let due = last.map(|t| t.elapsed() >= BACKUP_INTERVAL).unwrap_or(true);
+            if due {
+                let bak = path.with_extension("json.bak");
+                fs::rename(path, &bak).map_err(|e| format!("backup failed: {}", e))?;
+                *last = Some(Instant::now());
+            }
         }
         fs::rename(&tmp, path).map_err(|e| format!("rename failed: {}", e))?;
         Ok(())
@@ -524,6 +620,8 @@ mod tests {
                 p.theme = Some("dark".into());
                 p.font_size = Some(14.0);
             });
+            /* patch_state is debounced; flush before re-reading from disk */
+            mgr.flush();
         }
         let mgr = AppStateManager::new(path.clone());
         let st = mgr.get_state();
@@ -684,6 +782,7 @@ mod tests {
         assert_eq!(mgr.get_state().version, 6, "in memory");
         /* and on disk, after any mutation */
         mgr.patch_prefs(|p| p.theme = Some("dark".into()));
+        mgr.flush();
         let raw: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(raw["version"], 6, "persisted");
@@ -735,6 +834,7 @@ mod tests {
                 title: Some("dev".into()),
             });
         });
+        mgr.flush();
         let raw: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let tab = &raw["openTabs"][0];
