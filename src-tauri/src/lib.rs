@@ -30,6 +30,13 @@ pub fn run() {
     // via builder.manage() — state is then available before WebView2
     // initialises, making the Windows "state not managed" boot error impossible.
     let app_state = state::AppStateManager::new(state::AppStateManager::pre_build_path());
+    // Same reason for the pty manager: Tauri creates the window (and WebView2,
+    // which starts dispatching IPC) inside setup(), before the app's own setup
+    // closure runs. Managing it there left a window where `tab_restore` could
+    // arrive before `.manage(pty)` — the "state not managed for field `pty`"
+    // boot error. Construction here is I/O-free; the daemon handshake runs in
+    // start(), below, and commands that arrive meanwhile wait on its gate.
+    let pty_manager = pty::PtyManager::new();
     /* safe mode is decided before the webview exists: if it engages, the
        renderer must know from its very first paint so it can skip plugin
        activation instead of racing the banner */
@@ -63,15 +70,18 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(app_state);
+        .manage(app_state)
+        .manage(pty_manager);
     builder = builder.setup(move |app| {
         eprintln!("[perf] backend-ready-ms={}", process_start.elapsed().as_millis());
         use tauri::Emitter;
         use tauri::Manager;
         let handle = app.handle().clone();
+        /* connect to (or spawn) the pty host daemon. Runs first because it is
+           the slowest step, and any IPC command that arrives meanwhile waits
+           on the manager's ready gate instead of failing. */
+        app.state::<pty::PtyManager>().start(handle.clone());
         commands::cleanup_clipboard_temp_files();
-        let pty = pty::PtyManager::new(Some(handle.clone()));
-        app.manage(pty);
         git::init_watch(handle.clone());
         /* boot-time remote restore: mirrors Electron's index.ts startRemote()
            call when prefs.remote.enabled was persisted true from a prior

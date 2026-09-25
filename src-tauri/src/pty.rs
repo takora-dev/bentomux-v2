@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::Emitter;
 
@@ -28,6 +28,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
    per pane and flush at ~60 Hz so one burst costs one emit. */
 const PTY_FLUSH_MS: u64 = 16;
 const PTY_MAX_BUFFER: usize = 256 * 1024;
+
+/* how long a command may wait for start()'s daemon handshake. Comfortably
+   above the handshake's own worst case (connect + two request timeouts) so
+   it never cuts a slow-but-working host off. */
+const READY_TIMEOUT: Duration = Duration::from_secs(45);
 
 /* snapshot of a term's identity for callers that don't need the handles */
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -67,7 +72,10 @@ fn host_verdict(version: u64, term_count: usize, just_spawned: bool) -> HostVerd
 
 pub struct PtyManager {
     terms: Arc<Mutex<HashMap<String, TermInfo>>>,
-    app: Option<tauri::AppHandle>,
+    /* the handle is set by start(), which runs inside Tauri's setup; the
+       reader thread takes the Arc and reads it at emit time, so panes that
+       produce output before that still reach the renderer */
+    app: Arc<OnceLock<tauri::AppHandle>>,
     /* observers of raw pty output (agent detection feeds a headless parser) */
     data_tx: tokio::sync::broadcast::Sender<(String, String)>,
     exit_tx: tokio::sync::broadcast::Sender<(String, i32)>,
@@ -75,6 +83,12 @@ pub struct PtyManager {
     out: Arc<Mutex<Option<mpsc::Sender<String>>>>,
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>>,
     seq: AtomicU64,
+    /* the daemon handshake is done by start(), which can take seconds when
+       the host has to be spawned. Commands arrive on WebView2's threads the
+       moment the window paints, so they wait on this gate instead of racing
+       an empty transport. */
+    ready: Mutex<bool>,
+    ready_cv: Condvar,
 }
 
 pub fn decode_pty_bytes(carry: &mut Vec<u8>, bytes: &[u8]) -> Option<String> {
@@ -106,20 +120,60 @@ fn unb64(text: &str) -> Option<Vec<u8>> {
 }
 
 impl PtyManager {
-    pub fn new(app: Option<tauri::AppHandle>) -> Self {
+    /* Cheap and I/O-free on purpose: this runs on the Tauri Builder, before
+       the window exists, so `pty` is managed before WebView2 can fire its
+       first IPC call. The daemon handshake happens in start(), inside setup. */
+    pub fn new() -> Self {
         let (data_tx, _) = tokio::sync::broadcast::channel(1024);
         let (exit_tx, _) = tokio::sync::broadcast::channel(256);
-        let mut manager = PtyManager {
+        PtyManager {
             terms: Arc::new(Mutex::new(HashMap::new())),
-            app,
+            app: Arc::new(OnceLock::new()),
             data_tx,
             exit_tx,
             out: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(HashMap::new())),
             seq: AtomicU64::new(1),
-        };
-        manager.connect_with_handshake();
-        manager
+            ready: Mutex::new(false),
+            ready_cv: Condvar::new(),
+        }
+    }
+
+    /* Connect to (or spawn) the pty host daemon and publish the app handle.
+       Runs inside Tauri's setup; a command that arrives while this is still
+       working waits on the ready gate rather than seeing an empty manager. */
+    pub fn start(&self, app: tauri::AppHandle) {
+        let _ = self.app.set(app);
+        self.connect_with_handshake();
+        self.open_gate();
+    }
+
+    fn open_gate(&self) {
+        let mut ready = self.ready.lock().unwrap();
+        *ready = true;
+        self.ready_cv.notify_all();
+    }
+
+    /* Block until start() has finished. The gate opens even when the
+       handshake failed, so commands then report "PTY host not connected"
+       instead of hanging forever.
+
+       The timeout is insurance, not a normal path: the handshake is already
+       bounded (connect 6s + request 15s, at most twice), so this can only
+       fire if start() was never called at all. A command that reports a
+       missing host beats a window that never answers. */
+    fn wait_ready(&self) {
+        let mut ready = self.ready.lock().unwrap();
+        let deadline = std::time::Instant::now() + READY_TIMEOUT;
+        while !*ready {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                eprintln!("[bentomux] pty manager never became ready; commands report no host");
+                return;
+            }
+            let (guard, _) = self.ready_cv.wait_timeout(ready, deadline - now).unwrap();
+            ready = guard;
+        }
     }
 
     /* A daemon outlives app updates and app restarts, so before trusting one
@@ -127,7 +181,7 @@ impl PtyManager {
        something worth keeping in it. A daemon with no live pane is replaced
        too: it still carries the environment of whatever launch started it,
        and panes opened now should see this launch's PATH. */
-    fn connect_with_handshake(&mut self) {
+    fn connect_with_handshake(&self) {
         for attempt in 0..2 {
             let (stream, just_spawned) = match connect_host() {
                 Ok(pair) => pair,
@@ -163,9 +217,11 @@ impl PtyManager {
     }
 
     /* stop the daemon and wait for it to stop answering, so the next
-       connect_host() starts a fresh one instead of racing the dying process */
+       connect_host() starts a fresh one instead of racing the dying process.
+       Called from connect_with_handshake, so it must not wait on the gate
+       that start() only opens after the handshake returns. */
     fn restart_host(&self) {
-        self.shutdown_host();
+        self.shutdown_host_now();
         if !crate::pty_host::wait_host_gone(Duration::from_secs(4)) {
             eprintln!("[bentomux] pty host still listening after shutdown");
         }
@@ -181,7 +237,7 @@ impl PtyManager {
         self.exit_tx.subscribe()
     }
 
-    fn attach_transport(&mut self, stream: HostStream) {
+    fn attach_transport(&self, stream: HostStream) {
         let HostStream { reader, mut writer } = stream;
         let (out_tx, out_rx) = mpsc::channel::<String>();
 
@@ -204,6 +260,8 @@ impl PtyManager {
         let pending = self.pending.clone();
         let data_tx = self.data_tx.clone();
         let exit_tx = self.exit_tx.clone();
+        /* the handle arrives with start(); read it per emit so output that
+           lands before setup finishes is not dropped on the floor */
         let app = self.app.clone();
         let out_slot = self.out.clone();
         /* per-pane coalescing buffers, flushed on a 16 ms cadence by the
@@ -224,11 +282,13 @@ impl PtyManager {
             };
             for (id, chunk) in batch {
                 let _ = flush_data.send((id.clone(), chunk.clone()));
-                if let Some(app) = &flush_app {
+                if let Some(app) = flush_app.get() {
                     let _ = app.emit("pty:data", (id, chunk));
                 }
             }
-            if flush_app.is_none() && flush_data.receiver_count() == 0 {
+            /* no handle yet (start() has not run) and no observers: this
+               transport has nobody to serve, so let the thread end */
+            if flush_app.get().is_none() && flush_data.receiver_count() == 0 {
                 break;
             }
         });
@@ -249,14 +309,16 @@ impl PtyManager {
                         let Some(bytes) = msg.get("data").and_then(Value::as_str).and_then(unb64) else { continue };
                         let chunk = String::from_utf8_lossy(&bytes).into_owned();
                         /* coalesce before the WebView emit; data_tx fans out
-                           from the flusher so ordering per pane is preserved */
+                           from the flusher so ordering per pane is preserved.
+                           The app handle arrives with start(), so read it at
+                           emit time rather than capturing an Option. */
                         let mut guard = coalesce.lock().unwrap();
                         let entry = guard.entry(id.clone()).or_default();
                         if entry.len() + chunk.len() > PTY_MAX_BUFFER {
                             let pending = std::mem::take(entry);
                             drop(guard);
                             let _ = data_tx.send((id.clone(), pending.clone()));
-                            if let Some(app) = &app {
+                            if let Some(app) = app.get() {
                                 let _ = app.emit("pty:data", (id.clone(), pending));
                             }
                             coalesce.lock().unwrap().insert(id, chunk);
@@ -281,7 +343,7 @@ impl PtyManager {
                             term.alive = false;
                         }
                         let _ = exit_tx.send((id.clone(), code));
-                        if let Some(app) = &app {
+                        if let Some(app) = app.get() {
                             let _ = app.emit("pty:exit", (id, code));
                         }
                     }
@@ -383,6 +445,7 @@ impl PtyManager {
         workspace_path: &str,
         shell_pref: Option<&str>,
     ) -> Result<String, String> {
+        self.wait_ready();
         let reply = self.request(json!({
             "t": "spawn",
             "workspaceId": workspace_id,
@@ -402,6 +465,11 @@ impl PtyManager {
        running in the daemon is reattached as-is (that is the whole point of
        the daemon); anything else gets a fresh shell under a new id. */
     pub fn restore_terms(&self, workspaces: &[WorkspaceRec], open_tabs: &[TabRec]) -> Vec<TabRec> {
+        /* Without this the restore can run before the transport exists:
+           host_terms() would fail, the live list would read empty, and every
+           persisted tab would be replaced with a fresh shell — orphaning the
+           panes still running in the daemon. */
+        self.wait_ready();
         let live = match self.host_terms() {
             Ok(live) => live,
             Err(error) => {
@@ -500,10 +568,12 @@ impl PtyManager {
     }
 
     pub fn get_term(&self, id: &str) -> Option<TermInfo> {
+        self.wait_ready();
         self.terms.lock().unwrap().get(id).cloned()
     }
 
     pub fn write_term(&self, id: &str, data: &str) -> Result<(), String> {
+        self.wait_ready();
         if !self.terms.lock().unwrap().contains_key(id) {
             return Err(format!("Terminal not found: {}", id));
         }
@@ -512,6 +582,7 @@ impl PtyManager {
     }
 
     pub fn resize_term(&self, id: &str, cols: u16, rows: u16) -> Result<(), String> {
+        self.wait_ready();
         /* unknown terms resize as a no-op, like the pre-daemon version */
         if !self.terms.lock().unwrap().contains_key(id) {
             return Ok(());
@@ -520,6 +591,7 @@ impl PtyManager {
     }
 
     pub fn kill_term(&self, id: &str) -> bool {
+        self.wait_ready();
         let known = self.terms.lock().unwrap().remove(id).is_some();
         if known {
             crate::detect::screen::clear_snapshot(id);
@@ -529,6 +601,7 @@ impl PtyManager {
     }
 
     pub fn kill_terms_for_workspace(&self, workspace_id: &str) {
+        self.wait_ready();
         let ids: Vec<String> = {
             let map = self.terms.lock().unwrap();
             map.values()
@@ -542,6 +615,7 @@ impl PtyManager {
     }
 
     pub fn kill_all_terms(&self) {
+        self.wait_ready();
         let ids: Vec<String> = self.terms.lock().unwrap().keys().cloned().collect();
         for id in ids {
             self.kill_term(&id);
@@ -549,6 +623,7 @@ impl PtyManager {
     }
 
     pub fn live_terms(&self) -> Vec<TermInfo> {
+        self.wait_ready();
         self.terms
             .lock()
             .unwrap()
@@ -561,6 +636,11 @@ impl PtyManager {
     /* the daemon outlives the app, but it cannot outlive the binary being
        replaced on disk: used right before an update installs */
     pub fn shutdown_host(&self) {
+        self.wait_ready();
+        self.shutdown_host_now();
+    }
+
+    fn shutdown_host_now(&self) {
         let _ = self.send(json!({ "t": "shutdown" }));
         self.terms.lock().unwrap().clear();
     }
@@ -650,18 +730,11 @@ mod tests {
     }
 
     fn manager_with(stream: crate::pty_host::HostStream) -> PtyManager {
-        let (data_tx, _) = tokio::sync::broadcast::channel(1024);
-        let (exit_tx, _) = tokio::sync::broadcast::channel(256);
-        let mut manager = PtyManager {
-            terms: Arc::new(Mutex::new(HashMap::new())),
-            app: None,
-            data_tx,
-            exit_tx,
-            out: Arc::new(Mutex::new(None)),
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            seq: AtomicU64::new(1),
-        };
+        let manager = PtyManager::new();
         manager.attach_transport(stream);
+        /* tests hand the transport over directly, so the manager is ready
+           without the start() handshake */
+        manager.open_gate();
         manager
     }
 
@@ -883,6 +956,38 @@ mod tests {
         assert_eq!(host_verdict(PROTOCOL_VERSION + 1, 3, false), Replace("protocol mismatch"));
         assert_eq!(host_verdict(0, 3, false), Replace("protocol mismatch"));
         assert_eq!(host_verdict(0, 0, true), Replace("protocol mismatch"));
+    }
+
+    /* The manager is managed on the Tauri Builder, before the window exists,
+       so a command can arrive while start() is still doing the daemon
+       handshake. Those commands must wait for the transport, not run against
+       an empty manager. */
+    #[test]
+    fn test_commands_wait_for_the_ready_gate() {
+        let (host, mgr) = test_manager("ready-gate");
+        /* a fresh manager that has not been started: the gate is closed */
+        let pending = Arc::new(PtyManager::new());
+        assert!(!*pending.ready.lock().unwrap());
+
+        let waiter = pending.clone();
+        let joined = std::thread::spawn(move || {
+            /* this would return an empty vec immediately if the gate were
+               missing; with it, the call parks until the gate opens */
+            waiter.live_terms()
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(!joined.is_finished(), "live_terms must block while the gate is closed");
+        pending.open_gate();
+        let terms = joined.join().expect("waiter thread");
+        assert!(terms.is_empty(), "no terms are known before the handshake");
+
+        /* once started, the same call sees the live pane without delay */
+        let workspace = ws("ready-gate");
+        let shell_pref = if cfg!(windows) { Some("cmd") } else { None };
+        let id = mgr.create_term(&workspace.id, &workspace.path, shell_pref).expect("spawn");
+        assert!(mgr.live_terms().iter().any(|t| t.id == id));
+        mgr.kill_term(&id);
+        drop(host);
     }
 
     /* a reconnecting app must not be streamed panes it has not asked for: the
