@@ -31,6 +31,9 @@ import { contributionIcon, contributionLabel } from './plugin/icons';
 import api from '../preload/bentomux';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 document.documentElement.classList.toggle('macos', /Mac/.test(navigator.platform));
+/* Windows runs frameless (tauri.windows.conf.json) and draws its own window
+   buttons, so the stylesheet needs to know which platform it is on. */
+document.documentElement.classList.toggle('windows', /Win/.test(navigator.platform));
 
 /* Suppress native browser context menu everywhere except inside
    .terminal-page which wires its own contextmenu handler. */
@@ -298,6 +301,12 @@ function wireWindowControls(): void {
     ui.maximized = max;
     document.body.classList.toggle('maximized', max);
   });
+  /* The three OS buttons only exist on Windows (the other platforms keep their
+     native frame), but the handlers are harmless there: the elements are in
+     the DOM either way and the commands are cross-platform. */
+  $('#winMinBtn').addEventListener('click', () => { api.minimize(); });
+  $('#winMaxBtn').addEventListener('click', () => { api.toggleMaximize(); });
+  $('#winCloseBtn').addEventListener('click', () => { api.close(); });
   wireWindowDrag();
 }
 

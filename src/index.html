@@ -24,7 +24,15 @@
         <span class="git-pill-add" data-role="add">+0</span>
         <span class="git-pill-del" data-role="del">-0</span>
       </button>
-      <button id="themeBtn" class="tbtn" title="Toggle dark mode" aria-label="Toggle dark mode">◐</button>
+      <!-- Windows draws its own caption bar off (`decorations: false` in
+           tauri.windows.conf.json), so the OS buttons live here instead.
+           `.win-btn` is hidden unless <html> carries `.windows`. -->
+      <div class="win-controls">
+        <button id="themeBtn" class="tbtn" title="Toggle dark mode" aria-label="Toggle dark mode">◐</button>
+        <button id="winMinBtn" class="tbtn win-btn" title="Minimize" aria-label="Minimize"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M4 8h8"/></svg></button>
+        <button id="winMaxBtn" class="tbtn win-btn" title="Maximize" aria-label="Maximize"><svg class="ico-max" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><rect x="4.5" y="4.5" width="7" height="7" rx="1"/></svg><svg class="ico-restore" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><rect x="3" y="5.5" width="7" height="7" rx="1"/><path d="M5.5 5.5V4.2a1 1 0 0 1 1-1h5.3a1 1 0 0 1 1 1v5.3a1 1 0 0 1-1 1H11"/></svg></button>
+        <button id="winCloseBtn" class="tbtn tclose win-btn" title="Close" aria-label="Close"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg></button>
+      </div>
     </header>
     <div class="win-body" id="winBody">
       <aside id="sidebar" class="sidebar">

@@ -786,9 +786,22 @@ body:not(.pane-hidden) .titlebar.has-tabs .top-tools{display:flex!important}
 .titlebar.has-tabs .top-tools{flex:1 1 auto;min-width:0}
 .titlebar.has-tabs .tspacer{display:none}
 
-/* window controls bundled into one group: theme → minimize → maximize → close */
-.win-controls{display:flex;align-items:center;height:28px;margin-left:6px;padding:0 3px;border-radius:8px;background:var(--surface);flex:0 0 auto}
-.win-controls .tbtn{width:32px;height:24px}
+/* Window controls bundled into one group: theme → minimize → maximize → close.
+   Only Windows shows the three OS buttons and the capsule around them — the
+   frame there is ours (decorations:false in tauri.windows.conf.json). On macOS
+   the traffic lights are native and on Linux the frame is native, so the group
+   holds just the theme toggle and lays out exactly as it did before. */
+.win-controls{display:flex;align-items:center;height:28px;flex:0 0 auto}
+.win-controls .win-btn{display:none}
+.windows .win-controls{margin-left:6px;padding:0 3px;border-radius:8px;background:var(--surface)}
+.windows .win-controls .tbtn{width:32px;height:24px}
+.windows .win-controls .win-btn{display:inline-flex}
+/* maximize button swaps glyph on the same `maximized` class the drag handler
+   already toggles, so the icon stays right for OS-driven maximize too
+   (`.maximized` lands on <body>, `.windows` on <html>) */
+.windows #winMaxBtn .ico-restore{display:none}
+.windows body.maximized #winMaxBtn .ico-max{display:none}
+.windows body.maximized #winMaxBtn .ico-restore{display:block}
 
 /* ---------------- context menu (right-click) ---------------- */
 
