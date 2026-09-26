@@ -10,7 +10,7 @@ import { ui, type Route, type TabEntry } from './state';
 import { db, setDb, branches, runtime, activity } from './store';
 import { registerRenderers, render } from './render';
 import { renderTabs, activate, stepHistory, registerRestoredTab } from './views/tabs';
-import { addWorkspaceFlow, renderSidebar, patchPaneStatuses, toggleGitPanel } from './views/sidebar';
+import { openAddWorkspaceMenu, renderSidebar, patchPaneStatuses, toggleGitPanel } from './views/sidebar';
 import { agentsPage, agentDetailPage } from './views/agents';
 import { welcomePage, disposeWidgets } from './views/welcome';
 import {
@@ -231,7 +231,7 @@ function togglePaneHidden(): void {
 function wirePaneToggle(): void {
   $('#paneBtn').addEventListener('click', togglePaneHidden);
   $('#paneTopBtn').addEventListener('click', togglePaneHidden);
-  $('#compactAddBtn').addEventListener('click', () => addWorkspaceFlow());
+  $('#compactAddBtn').addEventListener('click', e => openAddWorkspaceMenu(e.currentTarget as HTMLElement));
   $('#compactSettingsBtn').addEventListener('click', () => {
     void import('./views/settings').then(m => m.openSettingsModal());
   });
