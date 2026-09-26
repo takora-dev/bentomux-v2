@@ -266,16 +266,53 @@ function endPaneDrag(e: PointerEvent): void {
 }
 
 export function addWorkspaceFlow(): void {
-  void api.chooseFolder().then(async path => {
+  void api.chooseFolder().then(path => {
     if (!path) return;
-    setDb(await api.addWorkspace(path));
-    const added = findAddedWorkspace(path);
-    if (!added) return;
-    branches.set(added.id, await api.branchFor(added.path));
-    db.prefs.expanded = { ...db.prefs.expanded, [added.id]: true };
-    void api.setPrefs({ expanded: db.prefs.expanded });
-    renderSidebar();
+    void addWorkspaceAt(path);
   });
+}
+
+/* open (or re-activate) a workspace for an already-known path — the shared
+   tail of the native picker flow and the Recent Folder submenu */
+async function addWorkspaceAt(path: string): Promise<void> {
+  setDb(await api.addWorkspace(path));
+  const added = findAddedWorkspace(path);
+  if (!added) return;
+  branches.set(added.id, await api.branchFor(added.path));
+  db.prefs.expanded = { ...db.prefs.expanded, [added.id]: true };
+  void api.setPrefs({ expanded: db.prefs.expanded });
+  renderSidebar();
+}
+
+/* ---------------- add-workspace menu (the + in the workspace header) ---------------- */
+
+/* split a path into the folder name plus the directory it sits in; the
+   submenu shows the name with the parent as a dim hint so same-named
+   folders stay distinguishable */
+function pathParts(p: string): { name: string; dir: string } {
+  const parts = p.split(/[\\/]+/).filter(Boolean);
+  const name = parts.pop() || p;
+  const dir = parts.join('/') || '/';
+  return { name, dir };
+}
+
+function recentEntries(): MenuEntry[] {
+  const recents = db.prefs?.recentFolders || [];
+  if (!recents.length) return [{ label: 'No recent folders', disabled: true }];
+  return recents.map(p => {
+    const { name, dir } = pathParts(p);
+    return { label: name, hint: dir, title: p, action: () => void addWorkspaceAt(p) };
+  });
+}
+
+export function openAddWorkspaceMenu(anchor: HTMLElement): void {
+  if (contextMenuAnchoredTo(anchor)) { closeContextMenu(); return; }
+  const r = anchor.getBoundingClientRect();
+  const entries: MenuEntry[] = [
+    { label: 'Open Folder', icon: IC.folder, action: () => addWorkspaceFlow() },
+    { label: 'Recent Folder', icon: IC.clock, submenu: recentEntries() },
+  ];
+  openContextMenu(r.left, r.bottom + 4, entries, anchor);
 }
 
 function findAddedWorkspace(pickedPath: string) {
@@ -416,7 +453,13 @@ export function toggleGitPanel(): void {
 function workspaceLabelRow(): HTMLElement {
   return h('div', { class: 'ws-label' },
     h('span', { class: 'nav-label' }, 'Workspace'),
-    h('button', { class: 'ws-add', title: 'Add workspace folder', 'aria-label': 'Add workspace folder', onclick: () => addWorkspaceFlow() }, ic('plus')));
+    h('button', {
+      class: 'ws-add',
+      title: 'Add workspace folder',
+      'aria-label': 'Add workspace folder',
+      'aria-haspopup': 'menu',
+      onclick: (e: Event) => openAddWorkspaceMenu(e.currentTarget as HTMLElement),
+    }, ic('plus')));
 }
 
 function toggleWorkspaceExpanded(wsId: string, currentlyOpen: boolean): void {

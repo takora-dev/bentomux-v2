@@ -67,6 +67,9 @@ export interface Prefs {
   /* last custom tab title per workspace; new tabs inherit it so closing
      a tab never loses the name */
   tabTitles?: Record<string, string>;
+  /* folders picked through the add-workspace menu, newest first (capped at 8);
+     feeds the "Recent Folder" submenu */
+  recentFolders?: string[];
   /* user-resized approval overlay window (px); absent = built-in default */
   approvalOverlay?: { w: number; h: number };
   /* agent approval notifications; absent = enabled (overlay pop + chime) */

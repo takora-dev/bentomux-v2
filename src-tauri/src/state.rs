@@ -88,6 +88,9 @@ pub struct Prefs {
     /* last custom tab title per workspace; new tabs inherit it so closing
        a tab never loses the name */
     pub tab_titles: Option<HashMap<String, String>>,
+    /* folders picked through the add-workspace menu, newest first (capped at 8);
+       feeds the "Recent Folder" submenu */
+    pub recent_folders: Option<Vec<String>>,
     /* user-resized approval overlay window (px); absent = built-in default */
     pub approval_overlay: Option<OverlaySize>,
     /* agent approval notifications; absent = enabled (overlay pop + chime) */
@@ -117,6 +120,7 @@ impl Default for Prefs {
             sidebar_width: Some(248.0),
             expanded: Some(HashMap::new()),
             tab_titles: None,
+            recent_folders: None,
             approval_overlay: None,
             notif_enabled: None,
             notif_sound: None,

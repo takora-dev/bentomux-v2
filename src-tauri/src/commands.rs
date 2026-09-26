@@ -125,6 +125,11 @@ fn merge_prefs(cur: &mut Prefs, p: &serde_json::Value) {
             cur.tab_titles = Some(m);
         }
     }
+    if let Some(v) = obj.get("recentFolders") {
+        if let Ok(l) = serde_json::from_value::<Vec<String>>(v.clone()) {
+            cur.recent_folders = Some(l);
+        }
+    }
     if let Some(v) = obj.get("approvalOverlay") {
         if let Ok(s) = serde_json::from_value::<OverlaySize>(v.clone()) {
             cur.approval_overlay = Some(s);
@@ -138,6 +143,27 @@ fn merge_prefs(cur: &mut Prefs, p: &serde_json::Value) {
 }
 
 /* ---------------- workspaces ---------------- */
+
+/* the "Recent Folder" submenu is capped so the list stays scannable */
+const MAX_RECENT_FOLDERS: usize = 8;
+
+/* newest first, no case-insensitive duplicates, folders that vanished from
+   disk pruned. Called from workspace_add so every path that opens a folder
+   (sidebar menu, compact button, welcome CTA, plugin facade) is recorded. */
+fn remember_recent(prefs: &mut Prefs, path: &str) {
+    let norm = normalized_path(path);
+    let mut list: Vec<String> = prefs
+        .recent_folders
+        .take()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| normalized_path(p).to_lowercase() != norm.to_lowercase())
+        .filter(|p| std::path::Path::new(p).is_dir())
+        .collect();
+    list.insert(0, norm);
+    list.truncate(MAX_RECENT_FOLDERS);
+    prefs.recent_folders = Some(list);
+}
 
 /* native folder picker; returns the absolute path of the chosen folder or
    null when the user cancels. rfd opens its own OS dialog (no Tauri
@@ -161,7 +187,11 @@ pub fn workspace_add(path: String, state: State<'_, AppStateManager>) -> AppStat
         .find(|w| w.path.to_lowercase() == norm.to_lowercase())
         .cloned();
     if let Some(ws) = existing {
-        return state.patch_state(|s| s.active_workspace_id = Some(ws.id));
+        let ws_id = ws.id;
+        return state.patch_state(|s| {
+            remember_recent(&mut s.prefs, &norm);
+            s.active_workspace_id = Some(ws_id);
+        });
     }
     let id = format!(
         "ws-{}{:0>3}",
@@ -177,8 +207,9 @@ pub fn workspace_add(path: String, state: State<'_, AppStateManager>) -> AppStat
     // git watcher + branch hook wired in Phase 5 (git.rs).
     crate::git::watch_workspace(&id, &norm);
     state.patch_state(|s| {
-        s.workspaces.push(WorkspaceRec { id, path: norm, name });
+        s.workspaces.push(WorkspaceRec { id, path: norm.clone(), name });
         s.active_workspace_id = Some(ws_id);
+        remember_recent(&mut s.prefs, &norm);
     })
 }
 
@@ -856,7 +887,8 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::safe_temp_name;
+    use super::{remember_recent, safe_temp_name, MAX_RECENT_FOLDERS};
+    use crate::state::Prefs;
 
     #[test]
     fn keeps_extension_and_flattens_traversal() {
@@ -875,5 +907,64 @@ mod tests {
         assert_eq!(safe_temp_name("..."), "paste.bin");
         assert_eq!(safe_temp_name("report.pdf").len(), 10);
         assert_eq!(safe_temp_name(&"a".repeat(500)).chars().count(), 120);
+    }
+
+    /* remember_recent only keeps paths that still exist on disk, so the test
+       works against real (temporary) directories. */
+    fn temp_dirs(tag: &str, count: usize) -> (std::path::PathBuf, Vec<String>) {
+        let root = std::env::temp_dir().join(format!(
+            "bentomux-recent-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dirs = (0..count)
+            .map(|i| {
+                let dir = root.join(format!("ws{i}"));
+                std::fs::create_dir_all(&dir).unwrap();
+                dir.to_string_lossy().to_string()
+            })
+            .collect();
+        (root, dirs)
+    }
+
+    #[test]
+    fn recent_folders_are_newest_first_without_duplicates() {
+        let (root, dirs) = temp_dirs("order", 2);
+        let mut prefs = Prefs::default();
+
+        remember_recent(&mut prefs, &dirs[0]);
+        remember_recent(&mut prefs, &dirs[1]);
+        /* re-adding the first folder moves it to the front instead of duplicating */
+        remember_recent(&mut prefs, &dirs[0]);
+
+        let list = prefs.recent_folders.clone().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0], dirs[0]);
+        assert_eq!(list[1], dirs[1]);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn recent_folders_cap_and_prune_missing_dirs() {
+        let (root, dirs) = temp_dirs("cap", MAX_RECENT_FOLDERS + 2);
+        let mut prefs = Prefs::default();
+        for dir in &dirs {
+            remember_recent(&mut prefs, dir);
+        }
+        let list = prefs.recent_folders.clone().unwrap();
+        assert_eq!(list.len(), MAX_RECENT_FOLDERS);
+        assert_eq!(list[0], dirs[MAX_RECENT_FOLDERS + 1]);
+
+        /* a folder deleted from disk drops out on the next update */
+        std::fs::remove_dir_all(&dirs[MAX_RECENT_FOLDERS + 1]).ok();
+        remember_recent(&mut prefs, &dirs[0]);
+        let list = prefs.recent_folders.clone().unwrap();
+        assert!(!list.iter().any(|p| p == &dirs[MAX_RECENT_FOLDERS + 1]));
+        assert_eq!(list[0], dirs[0]);
+        std::fs::remove_dir_all(root).ok();
     }
 }
