@@ -921,9 +921,16 @@ pub fn app_quit(stop_panes: bool, pty: State<'_, PtyManager>, app: tauri::AppHan
 /* Kill cloudflared and the remote HTTP server before the NSIS/MSI installer
 overwrites cloudflared.exe, and stop the pty host: on Windows the installer
 cannot replace a running exe, and the host is that exe. Called by the
-renderer immediately before tauri-plugin-updater's downloadAndInstall(). */
+renderer immediately before tauri-plugin-updater's install().
+
+Only Windows needs any of it: the lock is on a file the installer rewrites.
+macOS/Linux unlink the old bundle and leave running processes alone, so the
+daemon — and every live pane in it — is left running. */
 #[tauri::command]
 pub fn shutdown_for_update(pty: State<'_, PtyManager>) {
+    if !cfg!(target_os = "windows") {
+        return;
+    }
     pty.shutdown_host();
     crate::remote::stop_tunnel();
     crate::remote::stop_remote();

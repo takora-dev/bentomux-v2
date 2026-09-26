@@ -93,21 +93,24 @@ export async function installUpdate(): Promise<void> {
   if (!cachedUpdate) return;
   set({ phase: 'downloading', progress: 0 });
   try {
-    // Kill cloudflared.exe before installer overwrites it (Windows file-lock)
-    await raw.invoke('shutdown_for_update').catch(() => {});
     let downloaded = 0;
     let total = 0;
-    await cachedUpdate.downloadAndInstall(event => {
+    /* download and install are separate calls so the daemon stays alive for
+       the whole download: only the install step replaces the binary, and
+       killing the pty host before it killed every pane and left every new
+       terminal unable to start until the app was restarted. */
+    await cachedUpdate.download(event => {
       if (event.event === 'Started') {
         total = event.data.contentLength ?? 0;
       } else if (event.event === 'Progress') {
         downloaded += event.data.chunkLength;
         set({ progress: total > 0 ? Math.round((downloaded / total) * 100) : 0 });
-      } else if (event.event === 'Finished') {
-        set({ phase: 'ready', progress: 100 });
       }
     });
-    set({ phase: 'ready' });
+    // release the files the installer cannot overwrite (Windows file locks)
+    await raw.invoke('shutdown_for_update').catch(() => {});
+    set({ phase: 'ready', progress: 100 });
+    await cachedUpdate.install();
   } catch (e) {
     set({ phase: 'error', error: String(e) });
   }
