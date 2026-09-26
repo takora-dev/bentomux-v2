@@ -29,24 +29,49 @@ const PANE_INDENT = 24;
 /* Patch pane status rows in place for the ~1 Hz runtime-status ticks.
    A full renderSidebar() rebuilds the whole nav (search, workspaces, dock)
    on every tick; this only touches the status/agent spans whose values
-   actually changed. Returns true when every changed pane was patched. */
+   actually changed. Returns true when every changed pane was patched.
+   Covers both the expanded sidebar rows and the compact rail's flyout. */
 export function patchPaneStatuses(): boolean {
   let patched = true;
-  for (const btn of $$('#nav button.workspace-child[data-pane]')) {
+  for (const btn of $$('#nav button.workspace-child[data-pane], .ws-flyout button.workspace-child[data-pane]')) {
     const paneId = (btn as HTMLElement).dataset.pane;
     if (!paneId) continue;
-    const st = runtime[paneId];
-    const status = st?.state ?? (st?.running ? 'working' : 'idle');
-    const agent = st?.runtime || 'shell';
-    const statusEl = btn.querySelector('.agent-status');
-    const agentEl = statusEl?.nextElementSibling?.nextElementSibling;
-    if (!statusEl || !(agentEl instanceof HTMLElement)) { patched = false; continue; }
-    const wantClass = 'agent-status ' + status;
-    if (statusEl.className !== wantClass) statusEl.className = wantClass;
-    if (statusEl.textContent !== status) statusEl.textContent = status;
-    if (agentEl.textContent !== agent) agentEl.textContent = agent;
+    if (!patchPaneRow(btn, paneId)) patched = false;
   }
   return patched;
+}
+
+/* one pane row's live fields: status dot, agent name, relative time, active
+   marker. Shared by the sidebar list and the compact rail's flyout so both
+   stay in step from the same tick without a rebuild. */
+function patchPaneRow(btn: HTMLElement, paneId: string): boolean {
+  const st = runtime[paneId];
+  const status = st?.state ?? (st?.running ? 'working' : 'idle');
+  const agent = st?.runtime || 'shell';
+  const statusEl = btn.querySelector('.agent-status');
+  const agentEl = statusEl?.nextElementSibling?.nextElementSibling;
+  if (!statusEl || !(agentEl instanceof HTMLElement)) return false;
+  const wantClass = 'agent-status ' + status;
+  if (statusEl.className !== wantClass) statusEl.className = wantClass;
+  if (statusEl.textContent !== status) statusEl.textContent = status;
+  if (agentEl.textContent !== agent) agentEl.textContent = agent;
+  const timeEl = btn.querySelector('.workspace-time');
+  if (timeEl instanceof HTMLElement) {
+    const ts = activity[paneId] || Date.now();
+    const want = rel(ts);
+    if (timeEl.textContent !== want) timeEl.textContent = want;
+    if (timeEl.getAttribute('data-ts') !== String(ts)) {
+      timeEl.setAttribute('data-ts', String(ts));
+      timeEl.title = abs(ts);
+    }
+  }
+  /* the focused pane can change without the pane set changing (a split
+     focuses its new shell), so the active marker is patched here too */
+  const entry = ui.tabs.find(t => t.route.view === 'terminal' && leavesOf(t).includes(paneId));
+  const isActive = !!entry && ui.route.view === 'terminal' && entry.id === ui.activeTab
+    && mostRecentPane(leavesOf(entry)) === paneId;
+  btn.classList.toggle('active', isActive);
+  return true;
 }
 
 /* Pointer drag state. HTML5 drag/drop is unreliable inside Tauri WebView. */
@@ -128,7 +153,7 @@ function onRevealEnd(btn: HTMLElement): void {
   });
 }
 
-function paneItem(row: PaneRow, pad: number, reveal: boolean = false): HTMLElement {
+function paneItem(row: PaneRow, pad: number, reveal: boolean = false, draggable: boolean = true): HTMLElement {
   const m = paneViewModel(row);
   const close = h('span', {
     class: 'pane-close',
@@ -165,10 +190,12 @@ function paneItem(row: PaneRow, pad: number, reveal: boolean = false): HTMLEleme
           h('span', { class: 'agent-sep' }, '·'),
           h('span', {}, m.agent || 'shell'))),
       close));
-  btn.addEventListener('pointerdown', e => startPaneDrag(e, btn, m.paneId));
-  btn.addEventListener('pointermove', movePaneDrag);
-  btn.addEventListener('pointerup', endPaneDrag);
-  btn.addEventListener('pointercancel', finishPaneDrag);
+  if (draggable) {
+    btn.addEventListener('pointerdown', e => startPaneDrag(e, btn, m.paneId));
+    btn.addEventListener('pointermove', movePaneDrag);
+    btn.addEventListener('pointerup', endPaneDrag);
+    btn.addEventListener('pointercancel', finishPaneDrag);
+  }
   if (reveal) onRevealEnd(btn);
   return btn;
 }
@@ -638,6 +665,266 @@ function renderWorkspaces(): void {
   lastExpanded = newExpanded;
 }
 
+/* ---------------- compact workspace rail ----------------
+   With the sidebar minimized (body.pane-hidden) the nav is hidden and only
+   the 72px rail is left. Each workspace gets a button there; hovering (or
+   focusing) it opens a flyout listing that workspace's terminals, so panes
+   stay reachable without expanding the sidebar again. The flyout lives on
+   document.body: renderSidebar() runs on every runtime-status tick and would
+   otherwise destroy an open flyout. */
+
+let railFlyout: HTMLElement | null = null;
+let railFlyoutWs: string | null = null;
+let railFlyoutAnchor: HTMLElement | null = null;
+let railFlyoutList: HTMLElement | null = null;
+/* pane ids the flyout's rows were built from; a change here means the rows
+   themselves must be rebuilt, everything else is patched in place */
+let railFlyoutIds = '';
+let railCloseTimer: number | null = null;
+
+const STATUS_RANK: Record<string, number> = { blocked: 3, working: 2, running: 2, idle: 1 };
+
+/* two-letter mark for the rail button: words → initials, otherwise the first
+   two characters. Keeps same-named folders distinguishable at 44px wide. */
+function workspaceInitials(name: string): string {
+  const parts = name.split(/[\s._-]+/).filter(Boolean);
+  if (!parts.length) return '?';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[1][0]).toUpperCase();
+}
+
+/* the workspace's loudest pane state, so the rail shows at a glance whether
+   something in a collapsed folder is blocked or still working */
+function workspaceStatus(wsId: string): string | null {
+  let best: string | null = null;
+  for (const { paneId } of wsPanes(wsId)) {
+    const st = runtime[paneId];
+    const status = st?.state ?? (st?.running ? 'working' : 'idle');
+    if (!best || (STATUS_RANK[status] || 0) > (STATUS_RANK[best] || 0)) best = status;
+  }
+  return best;
+}
+
+export function closeRailFlyout(): void {
+  if (railCloseTimer != null) { clearTimeout(railCloseTimer); railCloseTimer = null; }
+  railFlyout?.remove();
+  railFlyout = null;
+  railFlyoutWs = null;
+  railFlyoutAnchor = null;
+  railFlyoutList = null;
+  railFlyoutIds = '';
+  window.removeEventListener('keydown', onRailKey, true);
+  window.removeEventListener('pointerdown', onRailOutside, true);
+  window.removeEventListener('blur', closeRailFlyout);
+}
+
+function scheduleRailClose(): void {
+  if (railCloseTimer != null) clearTimeout(railCloseTimer);
+  /* grace period: the pointer may be travelling from the rail button into the
+     flyout, and closing on pointerleave alone would make that impossible */
+  railCloseTimer = window.setTimeout(() => { railCloseTimer = null; closeRailFlyout(); }, 160);
+}
+
+function cancelRailClose(): void {
+  if (railCloseTimer != null) { clearTimeout(railCloseTimer); railCloseTimer = null; }
+}
+
+function onRailKey(e: KeyboardEvent): void {
+  if (e.key !== 'Escape') return;
+  e.stopPropagation();
+  closeRailFlyout();
+}
+
+/* outside pointerdown (capture) dismisses; the anchor check keeps a click on
+   the owning rail button from closing the flyout it just opened */
+function onRailOutside(e: PointerEvent): void {
+  const t = e.target as Node;
+  if (railFlyout?.contains(t)) return;
+  if (railFlyoutAnchor?.contains(t)) return;
+  closeRailFlyout();
+}
+
+function onRailFocusOut(e: FocusEvent): void {
+  const next = e.relatedTarget as Node | null;
+  if (next && (railFlyout?.contains(next) || railFlyoutAnchor?.contains(next))) return;
+  scheduleRailClose();
+}
+
+/* the flyout's rows, in the order the workspace's panes appear */
+function paintRailFlyoutRows(): void {
+  if (!railFlyoutList || !railFlyoutWs) return;
+  const rows = wsPanes(railFlyoutWs);
+  railFlyoutList.innerHTML = '';
+  if (!rows.length) {
+    railFlyoutList.append(h('div', { class: 'ws-flyout-empty' }, 'No terminals'));
+    return;
+  }
+  for (const row of rows) railFlyoutList.append(paneItem(row, 8, false, false));
+}
+
+function paintRailFlyout(): void {
+  if (!railFlyout || !railFlyoutWs) return;
+  const ws = db.workspaces.find(w => w.id === railFlyoutWs);
+  if (!ws) { closeRailFlyout(); return; }
+  const list = h('div', { class: 'ws-flyout-list' });
+  /* a row's own handler activates the pane first; by the time the click
+     bubbles here the flyout has done its job. The × close button stops
+     propagation, so closing a pane leaves the list open. */
+  list.addEventListener('click', () => closeRailFlyout());
+  railFlyout.innerHTML = '';
+  railFlyout.append(
+    h('div', { class: 'ws-flyout-head' },
+      h('span', { class: 'ws-flyout-name' }, ws.name),
+      h('span', { class: 'ws-flyout-path', title: ws.path }, ws.path)),
+    list,
+    h('div', { class: 'ws-flyout-foot' },
+      h('button', {
+        class: 'nav-item ws-flyout-new',
+        type: 'button',
+        onclick: () => { closeRailFlyout(); void newTerminalTab(ws.id); },
+      }, ic('plus'), h('span', {}, 'New terminal'))));
+  railFlyoutList = list;
+  railFlyoutIds = wsPanes(ws.id)
+    .map(r => r.paneId + ':' + (branches.get(r.entry.workspaceId || '') || ''))
+    .join('\u0000');
+  paintRailFlyoutRows();
+}
+
+function positionRailFlyout(anchor: HTMLElement): void {
+  if (!railFlyout) return;
+  const sidebar = $('#sidebar');
+  if (!sidebar) return;
+  const r = anchor.getBoundingClientRect();
+  const fr = railFlyout.getBoundingClientRect();
+  const left = Math.max(4, Math.min(sidebar.getBoundingClientRect().right + 6, window.innerWidth - fr.width - 4));
+  const top = Math.max(4, Math.min(r.top - 4, window.innerHeight - fr.height - 4));
+  railFlyout.style.left = Math.round(left) + 'px';
+  railFlyout.style.top = Math.round(top) + 'px';
+}
+
+function openRailFlyout(wsId: string, anchor: HTMLElement): void {
+  cancelRailClose();
+  if (railFlyout && railFlyoutWs === wsId && railFlyoutAnchor === anchor) return;
+  closeRailFlyout();
+  railFlyoutWs = wsId;
+  railFlyoutAnchor = anchor;
+  railFlyout = h('div', { class: 'ws-flyout' });
+  railFlyout.addEventListener('pointerenter', cancelRailClose);
+  railFlyout.addEventListener('pointerleave', scheduleRailClose);
+  railFlyout.addEventListener('focusout', onRailFocusOut);
+  document.body.append(railFlyout);
+  paintRailFlyout();
+  positionRailFlyout(anchor);
+  window.addEventListener('keydown', onRailKey, true);
+  window.addEventListener('pointerdown', onRailOutside, true);
+  window.addEventListener('blur', closeRailFlyout);
+}
+
+/* the flyout stays open across renders. Rows are rebuilt only when the pane
+   set or a branch name changed (both are baked into the row markup); status,
+   agent, and time are patched in place so the row under the pointer is never
+   torn out from under it by the ~1 Hz tick. */
+function refreshRailFlyout(): void {
+  if (!railFlyout || !railFlyoutWs) return;
+  if (!railFlyoutAnchor?.isConnected) {
+    railFlyoutAnchor = $(`.ws-rail-item[data-ws="${railFlyoutWs}"]`);
+  }
+  if (!railFlyoutAnchor?.isConnected) { closeRailFlyout(); return; }
+  const sig = wsPanes(railFlyoutWs)
+    .map(r => r.paneId + ':' + (branches.get(r.entry.workspaceId || '') || ''))
+    .join('\u0000');
+  if (sig !== railFlyoutIds) {
+    railFlyoutIds = sig;
+    paintRailFlyoutRows();
+  } else {
+    for (const btn of $$('button.workspace-child[data-pane]', railFlyoutList ?? railFlyout)) {
+      const paneId = btn.dataset.pane;
+      if (paneId) patchPaneRow(btn, paneId);
+    }
+  }
+  positionRailFlyout(railFlyoutAnchor);
+}
+
+/* click on a rail button: go to that workspace's most recently used terminal.
+   An empty workspace has nothing to activate — the flyout's New terminal row
+   is the way in. */
+function activateWorkspaceTop(wsId: string): void {
+  const rows = wsPanes(wsId);
+  if (!rows.length) return;
+  const top = rows.reduce((a, b) => ((activity[b.paneId] || 0) > (activity[a.paneId] || 0) ? b : a));
+  closeRailFlyout();
+  activatePane(top.paneId, top.entry.id);
+}
+
+function railItem(ws: { id: string; name: string; path: string }): HTMLElement {
+  const btn = h('button', {
+    class: 'ws-rail-item',
+    type: 'button',
+    title: ws.name + '\n' + ws.path,
+    'aria-label': ws.name,
+    'aria-haspopup': 'true',
+    'data-ws': ws.id,
+    onclick: () => activateWorkspaceTop(ws.id),
+  },
+    h('span', { class: 'ws-rail-initials' }, workspaceInitials(ws.name)),
+    h('span', { class: 'ws-rail-status' }));
+  btn.addEventListener('pointerenter', () => openRailFlyout(ws.id, btn));
+  btn.addEventListener('pointerleave', scheduleRailClose);
+  btn.addEventListener('focus', () => openRailFlyout(ws.id, btn));
+  btn.addEventListener('focusout', onRailFocusOut);
+  return btn;
+}
+
+/* keep the active marker and status dot in step without rebuilding the rail:
+   a rebuilt button under the pointer never fires pointerenter again, and the
+   flyout would be left anchored to a detached node */
+function patchRailItems(rail: HTMLElement): void {
+  for (const btn of $$('.ws-rail-item', rail)) {
+    const wsId = btn.dataset.ws || '';
+    btn.classList.toggle('active', db.activeWorkspaceId === wsId);
+    const dot = btn.querySelector('.ws-rail-status');
+    if (!(dot instanceof HTMLElement)) continue;
+    /* the dot carries the workspace's loudest state as its class; a workspace
+       with no terminals has no state and therefore no dot (see .ws-rail-status) */
+    const status = workspaceStatus(wsId);
+    dot.className = status ? 'ws-rail-status ' + status : 'ws-rail-status';
+  }
+}
+
+/* the rail is rebuilt only when the workspace set changes; every other tick
+   patches in place, like the pane rows above */
+let railSignature = '';
+let railWired = false;
+
+function renderWsRail(): void {
+  const rail = $('#wsRail');
+  if (!rail) return;
+  /* the rail is the compact-mode surface: expanding the sidebar ends it */
+  if (db.prefs.paneHidden !== true) {
+    closeRailFlyout();
+    rail.innerHTML = '';
+    railSignature = '';
+    return;
+  }
+  if (!railWired) {
+    railWired = true;
+    /* a scrolled rail moves the anchor out from under the flyout */
+    rail.addEventListener('scroll', closeRailFlyout);
+  }
+  const signature = db.workspaces.map(w => w.id).join('\u0000');
+  if (signature !== railSignature) {
+    /* a workspace was added, removed, or reordered. Rebuilding the buttons
+       swaps the node under the pointer without a pointerleave, so the flyout
+       is closed instead of left anchored to a stale button. */
+    if (railSignature) closeRailFlyout();
+    rail.innerHTML = '';
+    rail.append(...db.workspaces.map(railItem));
+    railSignature = signature;
+  }
+  patchRailItems(rail);
+  refreshRailFlyout();
+}
+
 export function renderSidebar(): void {
   if (lastExpanded == null) lastExpanded = { ...(db.prefs?.expanded || {}) };
   const nav = $('#nav');
@@ -656,6 +943,7 @@ export function renderSidebar(): void {
     nav.append(h('div', { class: 'nav-label plugin-nav-label' }, 'Plugins'), ...pluginRows);
   }
 
+  renderWsRail();
   renderBottomDock();
   renderGitPanel();
 }

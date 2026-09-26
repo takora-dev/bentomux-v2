@@ -10,7 +10,7 @@ import { ui, type Route, type TabEntry } from './state';
 import { db, setDb, branches, runtime, activity } from './store';
 import { registerRenderers, render } from './render';
 import { renderTabs, activate, stepHistory, registerRestoredTab } from './views/tabs';
-import { openAddWorkspaceMenu, renderSidebar, patchPaneStatuses, toggleGitPanel } from './views/sidebar';
+import { openAddWorkspaceMenu, renderSidebar, patchPaneStatuses, toggleGitPanel, closeRailFlyout } from './views/sidebar';
 import { agentsPage, agentDetailPage } from './views/agents';
 import { welcomePage, disposeWidgets } from './views/welcome';
 import {
@@ -223,9 +223,15 @@ export function disposePluginViews(pluginId?: string): void {
 
 function togglePaneHidden(): void {
   clearTerminalSelections();
+  /* the rail flyout is a body-level popover, so the stylesheet hiding the rail
+     cannot take it down with the sidebar; expanding the sidebar ends it here */
+  closeRailFlyout();
   db.prefs.paneHidden = !(db.prefs.paneHidden === true);
   void api.setPrefs({ paneHidden: db.prefs.paneHidden });
   document.body.classList.toggle('pane-hidden', db.prefs.paneHidden === true);
+  /* the compact rail only exists while the sidebar is minimized, and its
+     buttons are built by renderSidebar() — the CSS alone cannot fill it */
+  renderSidebar();
 }
 
 function wirePaneToggle(): void {
