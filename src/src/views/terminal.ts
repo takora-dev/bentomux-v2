@@ -266,11 +266,18 @@ function wireClipboardPaste(term: Terminal, tabId: string): void {
   textarea.addEventListener('paste', e => {
     const cd = e.clipboardData;
     if (!cd) return;
-    const file = cd.files[0] || Array.from(cd.items).find(it => it.kind === 'file')?.getAsFile();
-    if (!file) return;
+    const files = Array.from(cd.files);
+    if (!files.length) {
+      for (const item of Array.from(cd.items)) {
+        if (item.kind !== 'file') continue;
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
+    }
+    if (!files.length) return;
     e.preventDefault();
     e.stopPropagation();
-    void stageClipboardFile(file).then(path => writePaths(tabId, [path]));
+    void Promise.all(files.map(stageClipboardFile)).then(paths => writePaths(tabId, paths));
   });
 }
 

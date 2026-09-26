@@ -1,9 +1,9 @@
 /* ---------------- pane layout tree for split terminal tabs ----------------
-   Rust port of src/shared/split-tree.ts. A tab holds a binary tree of
-   shells: leaves are pty ids, internal nodes are split axes ('v' = side
-   by side, 'h' = stacked). The serde representation is tag-compatible
-   with the renderer's TypeScript mirror: {"kind":"leaf","id":..} and
-   {"kind":"split","key":..,"dir":"v"|"h","first":..,"second":..}. */
+Rust port of src/shared/split-tree.ts. A tab holds a binary tree of
+shells: leaves are pty ids, internal nodes are split axes ('v' = side
+by side, 'h' = stacked). The serde representation is tag-compatible
+with the renderer's TypeScript mirror: {"kind":"leaf","id":..} and
+{"kind":"split","key":..,"dir":"v"|"h","first":..,"second":..}. */
 
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,7 @@ pub enum PaneNode {
 }
 
 /* 'v' = side by side, 'h' = stacked; serialized as the lowercase
-   letters the renderer uses */
+letters the renderer uses */
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dir {
     #[serde(rename = "v")]
@@ -41,12 +41,17 @@ pub fn leaf_node(id: &str) -> PaneNode {
 static KEY_SEQ: AtomicU32 = AtomicU32::new(0);
 
 /* caller supplies keys when splitting so main and renderer name the new
-   node identically without an extra round-trip */
+node identically without an extra round-trip */
 pub fn new_node_key() -> String {
     let seq = KEY_SEQ.fetch_add(1, Ordering::Relaxed);
     let millis = chrono::Utc::now().timestamp_millis().max(0) as u64;
     let rnd: u32 = rand::thread_rng().gen();
-    format!("s-{}-{}{:05x}", to_base36(millis), to_base36(seq as u64), rnd & 0xfffff)
+    format!(
+        "s-{}-{}{:05x}",
+        to_base36(millis),
+        to_base36(seq as u64),
+        rnd & 0xfffff
+    )
 }
 
 pub(crate) fn to_base36(mut n: u64) -> String {
@@ -93,9 +98,12 @@ pub fn tree_has_leaf(t: &PaneNode, id: &str) -> bool {
 pub fn tree_has_key(t: &PaneNode, key: &str) -> bool {
     match t {
         PaneNode::Leaf { .. } => false,
-        PaneNode::Split { key: k, first, second, .. } => {
-            k == key || tree_has_key(first, key) || tree_has_key(second, key)
-        }
+        PaneNode::Split {
+            key: k,
+            first,
+            second,
+            ..
+        } => k == key || tree_has_key(first, key) || tree_has_key(second, key),
     }
 }
 
@@ -114,7 +122,12 @@ pub fn split_leaf(t: PaneNode, pane_id: &str, dir: Dir, new_id: &str, key: &str)
                 PaneNode::Leaf { id }
             }
         }
-        PaneNode::Split { key: k, dir: d, first, second } => PaneNode::Split {
+        PaneNode::Split {
+            key: k,
+            dir: d,
+            first,
+            second,
+        } => PaneNode::Split {
             key: k,
             dir: d,
             first: Box::new(split_leaf(*first, pane_id, dir, new_id, key)),
@@ -124,7 +137,7 @@ pub fn split_leaf(t: PaneNode, pane_id: &str, dir: Dir, new_id: &str, key: &str)
 }
 
 /* remove a leaf; the enclosing axis collapses to its surviving branch.
-   Returns None when the last leaf goes away. */
+Returns None when the last leaf goes away. */
 pub fn remove_leaf(t: PaneNode, pane_id: &str) -> Option<PaneNode> {
     match t {
         PaneNode::Leaf { id } => {
@@ -134,7 +147,12 @@ pub fn remove_leaf(t: PaneNode, pane_id: &str) -> Option<PaneNode> {
                 Some(PaneNode::Leaf { id })
             }
         }
-        PaneNode::Split { key, dir, first, second } => {
+        PaneNode::Split {
+            key,
+            dir,
+            first,
+            second,
+        } => {
             let new_first = remove_leaf(*first, pane_id);
             let first = match new_first {
                 Some(f) => f,
@@ -157,7 +175,12 @@ pub fn remove_leaf(t: PaneNode, pane_id: &str) -> Option<PaneNode> {
 pub fn set_split_dir(t: PaneNode, key: &str, dir: Dir) -> PaneNode {
     match t {
         leaf @ PaneNode::Leaf { .. } => leaf,
-        PaneNode::Split { key: k, dir: d, first, second } => {
+        PaneNode::Split {
+            key: k,
+            dir: d,
+            first,
+            second,
+        } => {
             let (k, d) = if k == key { (k, dir) } else { (k, d) };
             PaneNode::Split {
                 key: k,
@@ -175,7 +198,12 @@ pub fn remap_leaves(t: PaneNode, map: &HashMap<String, String>) -> PaneNode {
         PaneNode::Leaf { id } => PaneNode::Leaf {
             id: map.get(&id).cloned().unwrap_or(id),
         },
-        PaneNode::Split { key, dir, first, second } => PaneNode::Split {
+        PaneNode::Split {
+            key,
+            dir,
+            first,
+            second,
+        } => PaneNode::Split {
             key,
             dir,
             first: Box::new(remap_leaves(*first, map)),
@@ -208,7 +236,9 @@ mod tests {
     fn shape(x: &PaneNode) -> String {
         match x {
             PaneNode::Leaf { id } => id.clone(),
-            PaneNode::Split { dir, first, second, .. } => format!(
+            PaneNode::Split {
+                dir, first, second, ..
+            } => format!(
                 "({} {} {})",
                 shape(first),
                 match dir {
@@ -232,7 +262,10 @@ mod tests {
     fn test_leaf_order_first_leaf_and_membership() {
         let t = split_leaf(leaf_node("a"), "a", Dir::V, "b", "k1");
         let t = split_leaf(t, "b", Dir::H, "c", "k2");
-        assert_eq!(leaf_ids(&t), vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(
+            leaf_ids(&t),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
         assert_eq!(first_leaf_id(&t), "a");
         assert!(tree_has_leaf(&t, "c"));
         assert!(!tree_has_leaf(&t, "z"));
@@ -289,15 +322,10 @@ mod tests {
         let t = split_leaf(leaf_node("a"), "a", Dir::V, "b", "k1");
         let t = split_leaf(t, "b", Dir::H, "c", "k2");
         let t = split_leaf(t, "a", Dir::H, "d", "k3");
-        let map: HashMap<String, String> = [
-            ("a", "A"),
-            ("b", "B"),
-            ("c", "C"),
-            ("d", "D"),
-        ]
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
+        let map: HashMap<String, String> = [("a", "A"), ("b", "B"), ("c", "C"), ("d", "D")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         let m = remap_leaves(t.clone(), &map);
         assert_eq!(shape(&m), "((A h D) v (B h C))");
         assert_eq!(leaf_ids(&m), vec!["A", "D", "B", "C"]);
@@ -324,8 +352,7 @@ mod tests {
     /* serde JSON must stay tag-compatible with the renderer's TS mirror */
     #[test]
     fn test_serde_matches_renderer_json() {
-        let leaf: serde_json::Value =
-            serde_json::to_value(leaf_node("a")).unwrap();
+        let leaf: serde_json::Value = serde_json::to_value(leaf_node("a")).unwrap();
         assert_eq!(leaf, serde_json::json!({ "kind": "leaf", "id": "a" }));
 
         let t = split_leaf(leaf_node("a"), "a", Dir::H, "b", "k1");

@@ -102,8 +102,8 @@ pub fn run_validate(args: &[String]) -> i32 {
 fn print_human(report: &validate::ValidationReport) {
     match &report.manifest {
         /* a salvaged manifest may have parsed an id but no name; showing a
-           blank where the title goes reads as a bug rather than a missing
-           field, and the missing field is already listed below */
+        blank where the title goes reads as a bug rather than a missing
+        field, and the missing field is already listed below */
         Some(m) if !m.name.trim().is_empty() => {
             println!("{} {}  ({})", m.name, m.version, m.id)
         }
@@ -194,7 +194,10 @@ mod tests {
         fs::write(dir.join("index.js"), "export function activate() {}").unwrap();
 
         /* without the flag the reserved publisher is refused */
-        assert_eq!(run_validate(&args(&[VALIDATE_FLAG, dir.to_str().unwrap()])), EXIT_INVALID);
+        assert_eq!(
+            run_validate(&args(&[VALIDATE_FLAG, dir.to_str().unwrap()])),
+            EXIT_INVALID
+        );
         /* with it, the bundled plugin validates */
         assert_eq!(
             run_validate(&args(&[VALIDATE_FLAG, dir.to_str().unwrap(), BUNDLED_FLAG])),
@@ -224,7 +227,11 @@ mod tests {
         let report = validate::validate_dir(&dir);
         let value = serde_json::to_value(&report).unwrap();
         assert_eq!(value["ok"], false);
-        assert!(value["errors"].as_array().unwrap().iter().any(|i| i["code"] == "entry-missing"));
+        assert!(value["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["code"] == "entry-missing"));
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -1,8 +1,8 @@
 /* ---------------- resources orchestrator ----------------
-   Rust port of src/main/resources.ts. Merges what is materialized in
-   each agent's real files with what Bentomux keeps in its shadow store
-   (toggle-off without a native flag), and routes save/toggle/delete to
-   the right adapters. */
+Rust port of src/main/resources.ts. Merges what is materialized in
+each agent's real files with what Bentomux keeps in its shadow store
+(toggle-off without a native flag), and routes save/toggle/delete to
+the right adapters. */
 
 use std::collections::{HashMap, HashSet};
 
@@ -69,7 +69,11 @@ struct Rich {
 }
 
 fn blank(kind: ResourceKind, id: String) -> Rich {
-    let scope = if kind == ResourceKind::Memory { Some("global".to_string()) } else { None };
+    let scope = if kind == ResourceKind::Memory {
+        Some("global".to_string())
+    } else {
+        None
+    };
     Rich {
         item: ResourceItem {
             id,
@@ -89,7 +93,13 @@ fn blank(kind: ResourceKind, id: String) -> Rich {
     }
 }
 
-fn fill_from_entry(r: &mut Rich, agent_id: &str, name: Option<&str>, def: &ResourceDef, updated_at: u64) {
+fn fill_from_entry(
+    r: &mut Rich,
+    agent_id: &str,
+    name: Option<&str>,
+    def: &ResourceDef,
+    updated_at: u64,
+) {
     let it = &mut r.item;
     if !it.agent_ids.iter().any(|a| a == agent_id) {
         it.agent_ids.push(agent_id.to_string());
@@ -105,7 +115,11 @@ fn fill_from_entry(r: &mut Rich, agent_id: &str, name: Option<&str>, def: &Resou
     r.live.insert(agent_id.to_string());
     match def {
         ResourceDef::Memory(m) => {
-            it.scope = Some(if m.scope == MemoryScope::Project { "project".to_string() } else { "global".to_string() });
+            it.scope = Some(if m.scope == MemoryScope::Project {
+                "project".to_string()
+            } else {
+                "global".to_string()
+            });
             it.workspace_path = Some(m.workspace_path.clone());
             it.content = Some(m.content.clone());
         }
@@ -179,21 +193,39 @@ fn caps(a: &dyn AgentAdapter, kind: &ResourceKind) -> bool {
     }
 }
 
-fn merged(kind: ResourceKind, adapters: &[Box<dyn AgentAdapter>], shadow: &ShadowStore) -> Vec<Rich> {
+fn merged(
+    kind: ResourceKind,
+    adapters: &[Box<dyn AgentAdapter>],
+    shadow: &ShadowStore,
+) -> Vec<Rich> {
     let mut map: HashMap<String, Rich> = HashMap::new();
     for ad in adapters {
         if !caps(ad.as_ref(), &kind) || !ad.detect() {
             continue;
         }
         for (id, entry) in ad.list(kind.clone()) {
-            let r = map.entry(id.clone()).or_insert_with(|| blank(kind.clone(), id.clone()));
-            fill_from_entry(r, ad.id(), entry.name.as_deref(), &entry.def, entry.updated_at);
+            let r = map
+                .entry(id.clone())
+                .or_insert_with(|| blank(kind.clone(), id.clone()));
+            fill_from_entry(
+                r,
+                ad.id(),
+                entry.name.as_deref(),
+                &entry.def,
+                entry.updated_at,
+            );
         }
     }
     for ad in adapters {
-        let snaps = shadow.get(ad.id()).and_then(|m| m.get(&kind)).cloned().unwrap_or_default();
+        let snaps = shadow
+            .get(ad.id())
+            .and_then(|m| m.get(&kind))
+            .cloned()
+            .unwrap_or_default();
         for (id, snap) in snaps {
-            let r = map.entry(id.clone()).or_insert_with(|| blank(kind.clone(), id.clone()));
+            let r = map
+                .entry(id.clone())
+                .or_insert_with(|| blank(kind.clone(), id.clone()));
             if r.live.contains(ad.id()) {
                 continue; /* live copy wins */
             }
@@ -202,7 +234,11 @@ fn merged(kind: ResourceKind, adapters: &[Box<dyn AgentAdapter>], shadow: &Shado
     }
     let mut out: Vec<Rich> = map.into_values().collect();
     for r in &mut out {
-        r.item.status = if r.live.is_empty() { "off".to_string() } else { "on".to_string() };
+        r.item.status = if r.live.is_empty() {
+            "off".to_string()
+        } else {
+            "on".to_string()
+        };
         /* native-off items keep their files but read as Off */
         for ad in adapters {
             if r.live.contains(ad.id()) && ad.is_natively_off(kind.clone(), r.item.id.clone()) {
@@ -221,30 +257,73 @@ fn def_from_build(p: &ResourceSavePayload) -> Result<ResourceDef, String> {
         ResourceKind::Memory => {
             let project = p.scope.as_deref() == Some("project");
             Ok(ResourceDef::Memory(MemoryDef {
-                scope: if project { MemoryScope::Project } else { MemoryScope::Global },
-                workspace_path: if project { p.workspace_path.as_ref().and_then(|w| w.clone()) } else { None },
-                content: p.content.clone().unwrap_or_default().replace("\r\n", "\n").trim().to_string(),
+                scope: if project {
+                    MemoryScope::Project
+                } else {
+                    MemoryScope::Global
+                },
+                workspace_path: if project {
+                    p.workspace_path.as_ref().and_then(|w| w.clone())
+                } else {
+                    None
+                },
+                content: p
+                    .content
+                    .clone()
+                    .unwrap_or_default()
+                    .replace("\r\n", "\n")
+                    .trim()
+                    .to_string(),
             }))
         }
         ResourceKind::Skills => {
-            let instructions = p.instructions.clone().unwrap_or_default().replace("\r\n", "\n");
+            let instructions = p
+                .instructions
+                .clone()
+                .unwrap_or_default()
+                .replace("\r\n", "\n");
             let description = instructions.trim().chars().take(100).collect::<String>();
-            Ok(ResourceDef::Skill(SkillDef { description, instructions }))
+            Ok(ResourceDef::Skill(SkillDef {
+                description,
+                instructions,
+            }))
         }
         ResourceKind::Mcp => {
             let raw = p.config_json.clone().unwrap_or_default();
-            let obj: serde_json::Value = serde_json::from_str(&raw).map_err(|_| "Configuration must be valid JSON.".to_string())?;
-            let command = obj.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let obj: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|_| "Configuration must be valid JSON.".to_string())?;
+            let command = obj
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if command.trim().is_empty() {
                 return Err("Configuration must include a \"command\" string.".to_string());
             }
-            let args = obj.get("args")
-                .map(|v| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>())
-                    .or_else(|| v.as_str().map(|s| s.split_whitespace().map(String::from).collect()))
-                    .unwrap_or_default())
+            let args = obj
+                .get("args")
+                .map(|v| {
+                    v.as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect::<Vec<_>>()
+                        })
+                        .or_else(|| {
+                            v.as_str()
+                                .map(|s| s.split_whitespace().map(String::from).collect())
+                        })
+                        .unwrap_or_default()
+                })
                 .unwrap_or_default();
-            let env = obj.get("env").and_then(|v| v.as_object())
-                .map(|o| o.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect::<HashMap<_, _>>())
+            let env = obj
+                .get("env")
+                .and_then(|v| v.as_object())
+                .map(|o| {
+                    o.iter()
+                        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                        .collect::<HashMap<_, _>>()
+                })
                 .unwrap_or_default();
             Ok(ResourceDef::Mcp(McpDef { command, args, env }))
         }
@@ -255,7 +334,11 @@ fn def_from_build(p: &ResourceSavePayload) -> Result<ResourceDef, String> {
 fn def_from_item(item: &ResourceItem) -> Option<ResourceDef> {
     match item.kind {
         ResourceKind::Memory => Some(ResourceDef::Memory(MemoryDef {
-            scope: if item.scope.as_deref() == Some("project") { MemoryScope::Project } else { MemoryScope::Global },
+            scope: if item.scope.as_deref() == Some("project") {
+                MemoryScope::Project
+            } else {
+                MemoryScope::Global
+            },
             workspace_path: item.workspace_path.clone().flatten(),
             content: item.content.clone().unwrap_or_default(),
         })),
@@ -265,11 +348,35 @@ fn def_from_item(item: &ResourceItem) -> Option<ResourceDef> {
         })),
         ResourceKind::Mcp => {
             let raw = item.config_json.as_deref().unwrap_or("");
-            serde_json::from_str::<serde_json::Value>(raw).ok().map(|obj| ResourceDef::Mcp(McpDef {
-                command: obj.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                args: obj.get("args").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default(),
-                env: obj.get("env").and_then(|v| v.as_object()).map(|o| o.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect()).unwrap_or_default(),
-            }))
+            serde_json::from_str::<serde_json::Value>(raw)
+                .ok()
+                .map(|obj| {
+                    ResourceDef::Mcp(McpDef {
+                        command: obj
+                            .get("command")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        args: obj
+                            .get("args")
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        env: obj
+                            .get("env")
+                            .and_then(|v| v.as_object())
+                            .map(|o| {
+                                o.iter()
+                                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    })
+                })
         }
     }
 }
@@ -278,8 +385,17 @@ fn def_to_data(def: &ResourceDef) -> serde_json::Map<String, serde_json::Value> 
     match def {
         ResourceDef::Memory(m) => {
             let mut o = serde_json::Map::new();
-            o.insert("scope".into(), serde_json::json!(if m.scope == MemoryScope::Project { "project" } else { "global" }));
-            if let Some(wp) = &m.workspace_path { o.insert("workspacePath".into(), serde_json::json!(wp)); }
+            o.insert(
+                "scope".into(),
+                serde_json::json!(if m.scope == MemoryScope::Project {
+                    "project"
+                } else {
+                    "global"
+                }),
+            );
+            if let Some(wp) = &m.workspace_path {
+                o.insert("workspacePath".into(), serde_json::json!(wp));
+            }
             o.insert("content".into(), serde_json::json!(m.content));
             o
         }
@@ -289,36 +405,71 @@ fn def_to_data(def: &ResourceDef) -> serde_json::Map<String, serde_json::Value> 
             o.insert("instructions".into(), serde_json::json!(s.instructions));
             o
         }
-        ResourceDef::Mcp(c) => serde_json::json!({ "command": c.command, "args": c.args, "env": c.env }).as_object().cloned().unwrap_or_default(),
+        ResourceDef::Mcp(c) => {
+            serde_json::json!({ "command": c.command, "args": c.args, "env": c.env })
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
+        }
     }
 }
 
-pub fn list_resources(workspaces: &[WorkspaceRec], kind: ResourceKind, state: &AppStateManager) -> Vec<ResourceItem> {
+pub fn list_resources(
+    workspaces: &[WorkspaceRec],
+    kind: ResourceKind,
+    state: &AppStateManager,
+) -> Vec<ResourceItem> {
     let adapters = index::all(workspaces);
     let shadow = state.get_state().shadow;
-    merged(kind, &adapters, &shadow).into_iter().map(|r| r.item).collect()
+    merged(kind, &adapters, &shadow)
+        .into_iter()
+        .map(|r| r.item)
+        .collect()
 }
 
-pub fn save_resource(workspaces: &[WorkspaceRec], p: ResourceSavePayload, state: &AppStateManager) -> Result<Vec<ResourceItem>, String> {
+pub fn save_resource(
+    workspaces: &[WorkspaceRec],
+    p: ResourceSavePayload,
+    state: &AppStateManager,
+) -> Result<Vec<ResourceItem>, String> {
     let def = def_from_build(&p)?;
     let adapters = index::all(workspaces);
     let shadow = state.get_state().shadow;
     let current = merged(p.kind.clone(), &adapters, &shadow);
-    let taken: HashSet<&str> = current.iter().filter(|r| r.item.id != p.id.as_deref().unwrap_or("")).map(|r| r.item.id.as_str()).collect();
+    let taken: HashSet<&str> = current
+        .iter()
+        .filter(|r| r.item.id != p.id.as_deref().unwrap_or(""))
+        .map(|r| r.item.id.as_str())
+        .collect();
     let id = match &p.id {
         Some(i) if !i.is_empty() => i.clone(),
-        _ => unique_slug(&slugify(&p.name), &taken.iter().map(|s| s.to_string()).collect()),
+        _ => unique_slug(
+            &slugify(&p.name),
+            &taken.iter().map(|s| s.to_string()).collect(),
+        ),
     };
 
     let prev = current.iter().find(|r| r.item.id == id);
     let prev_agent_ids = prev.map(|r| r.item.agent_ids.clone()).unwrap_or_default();
-    let targets: Vec<String> = p.agent_ids.iter().filter(|a| {
-        adapters.iter().find(|x| x.id() == *a).map(|x| caps(x.as_ref(), &p.kind)).unwrap_or(false)
-    }).cloned().collect();
+    let targets: Vec<String> = p
+        .agent_ids
+        .iter()
+        .filter(|a| {
+            adapters
+                .iter()
+                .find(|x| x.id() == *a)
+                .map(|x| caps(x.as_ref(), &p.kind))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
 
     /* unassign agents dropped from the selection */
     for a_id in prev_agent_ids.iter().filter(|a| !targets.contains(a)) {
-        let ad = match index::find_adapter(a_id, &adapters) { Some(x) => x, None => continue };
+        let ad = match index::find_adapter(a_id, &adapters) {
+            Some(x) => x,
+            None => continue,
+        };
         if let Some(prev) = prev {
             if let Some(d) = def_from_item(&prev.item) {
                 let _ = catch(|| ad.remove(p.kind.clone(), id.clone(), Some(&d)));
@@ -329,13 +480,19 @@ pub fn save_resource(workspaces: &[WorkspaceRec], p: ResourceSavePayload, state:
     }
 
     for a_id in &targets {
-        let ad = match index::find_adapter(a_id, &adapters) { Some(x) => x, None => continue };
+        let ad = match index::find_adapter(a_id, &adapters) {
+            Some(x) => x,
+            None => continue,
+        };
         let res = catch(|| {
             if p.enabled {
                 ad.write(p.kind.clone(), id.clone(), p.name.clone(), def.clone());
                 state.set_snapshot(a_id, p.kind.clone(), &id, None);
                 ad.native_toggle(p.kind.clone(), id.clone(), true);
-            } else if ad.has_native_toggle() && ((prev.map(|r| r.live.contains(a_id)).unwrap_or(false)) || ad.is_natively_off(p.kind.clone(), id.clone())) {
+            } else if ad.has_native_toggle()
+                && ((prev.map(|r| r.live.contains(a_id)).unwrap_or(false))
+                    || ad.is_natively_off(p.kind.clone(), id.clone()))
+            {
                 ad.native_toggle(p.kind.clone(), id.clone(), false);
             } else {
                 if prev.map(|r| r.live.contains(a_id)).unwrap_or(false) {
@@ -343,12 +500,17 @@ pub fn save_resource(workspaces: &[WorkspaceRec], p: ResourceSavePayload, state:
                         ad.remove(p.kind.clone(), id.clone(), Some(&d));
                     }
                 }
-                state.set_snapshot(a_id, p.kind.clone(), &id, Some(ResourceSnapshot {
-                    kind: p.kind.clone(),
-                    name: p.name.clone(),
-                    updated_at: now_ms(),
-                    data: def_to_data(&def),
-                }));
+                state.set_snapshot(
+                    a_id,
+                    p.kind.clone(),
+                    &id,
+                    Some(ResourceSnapshot {
+                        kind: p.kind.clone(),
+                        name: p.name.clone(),
+                        updated_at: now_ms(),
+                        data: def_to_data(&def),
+                    }),
+                );
             }
         });
         if let Err(e) = res {
@@ -359,7 +521,13 @@ pub fn save_resource(workspaces: &[WorkspaceRec], p: ResourceSavePayload, state:
     Ok(list_resources(workspaces, p.kind.clone(), state))
 }
 
-pub fn toggle_resource(workspaces: &[WorkspaceRec], kind: ResourceKind, id: String, on: bool, state: &AppStateManager) -> Vec<ResourceItem> {
+pub fn toggle_resource(
+    workspaces: &[WorkspaceRec],
+    kind: ResourceKind,
+    id: String,
+    on: bool,
+    state: &AppStateManager,
+) -> Vec<ResourceItem> {
     let adapters = index::all(workspaces);
     let shadow = state.get_state().shadow;
     let current = merged(kind.clone(), &adapters, &shadow);
@@ -369,7 +537,10 @@ pub fn toggle_resource(workspaces: &[WorkspaceRec], kind: ResourceKind, id: Stri
     };
     let live = rich.live.clone();
     for a_id in &rich.item.agent_ids {
-        let ad = match index::find_adapter(a_id, &adapters) { Some(x) => x, None => continue };
+        let ad = match index::find_adapter(a_id, &adapters) {
+            Some(x) => x,
+            None => continue,
+        };
         let item_def = def_from_item(&rich.item);
         let res = catch(|| {
             if on {
@@ -378,29 +549,49 @@ pub fn toggle_resource(workspaces: &[WorkspaceRec], kind: ResourceKind, id: Stri
                 }
                 state.set_snapshot(a_id, kind.clone(), &id, None);
                 ad.native_toggle(kind.clone(), id.clone(), true);
-            } else if ad.has_native_toggle() && (live.contains(a_id) || ad.is_natively_off(kind.clone(), id.clone())) {
+            } else if ad.has_native_toggle()
+                && (live.contains(a_id) || ad.is_natively_off(kind.clone(), id.clone()))
+            {
                 ad.native_toggle(kind.clone(), id.clone(), false); /* definition stays, flagged off natively */
             } else {
                 if let Some(d) = &item_def {
                     ad.remove(kind.clone(), id.clone(), Some(d));
                 }
-                state.set_snapshot(a_id, kind.clone(), &id, Some(ResourceSnapshot {
-                    kind: kind.clone(),
-                    name: rich.item.name.clone(),
-                    updated_at: now_ms(),
-                    data: def_to_data(item_def.as_ref().unwrap_or(&ResourceDef::Mcp(McpDef { command: String::new(), args: Vec::new(), env: HashMap::new() }))),
-                }));
+                state.set_snapshot(
+                    a_id,
+                    kind.clone(),
+                    &id,
+                    Some(ResourceSnapshot {
+                        kind: kind.clone(),
+                        name: rich.item.name.clone(),
+                        updated_at: now_ms(),
+                        data: def_to_data(item_def.as_ref().unwrap_or(&ResourceDef::Mcp(McpDef {
+                            command: String::new(),
+                            args: Vec::new(),
+                            env: HashMap::new(),
+                        }))),
+                    }),
+                );
             }
         });
         if let Err(e) = res {
-            eprintln!("[bentomux] toggle failed {} {} {e}", a_id, kind_to_str(&kind));
+            eprintln!(
+                "[bentomux] toggle failed {} {} {e}",
+                a_id,
+                kind_to_str(&kind)
+            );
             return list_resources(workspaces, kind, state);
         }
     }
     list_resources(workspaces, kind, state)
 }
 
-pub fn delete_resource(workspaces: &[WorkspaceRec], kind: ResourceKind, id: String, state: &AppStateManager) -> Vec<ResourceItem> {
+pub fn delete_resource(
+    workspaces: &[WorkspaceRec],
+    kind: ResourceKind,
+    id: String,
+    state: &AppStateManager,
+) -> Vec<ResourceItem> {
     let adapters = index::all(workspaces);
     let shadow = state.get_state().shadow;
     let current = merged(kind.clone(), &adapters, &shadow);
@@ -410,7 +601,10 @@ pub fn delete_resource(workspaces: &[WorkspaceRec], kind: ResourceKind, id: Stri
     };
     let item_def = def_from_item(&rich.item);
     for a_id in &rich.item.agent_ids {
-        let ad = match index::find_adapter(a_id, &adapters) { Some(x) => x, None => continue };
+        let ad = match index::find_adapter(a_id, &adapters) {
+            Some(x) => x,
+            None => continue,
+        };
         let res = catch(|| {
             if let Some(d) = &item_def {
                 ad.remove(kind.clone(), id.clone(), Some(d));
@@ -419,7 +613,11 @@ pub fn delete_resource(workspaces: &[WorkspaceRec], kind: ResourceKind, id: Stri
             ad.native_toggle(kind.clone(), id.clone(), true); /* clear any leftover override */
         });
         if let Err(e) = res {
-            eprintln!("[bentomux] delete failed {} {} {e}", a_id, kind_to_str(&kind));
+            eprintln!(
+                "[bentomux] delete failed {} {} {e}",
+                a_id,
+                kind_to_str(&kind)
+            );
             return list_resources(workspaces, kind, state);
         }
     }
@@ -427,11 +625,14 @@ pub fn delete_resource(workspaces: &[WorkspaceRec], kind: ResourceKind, id: Stri
 }
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /* run an adapter write/remove/toggle, trapping a panic the way Electron
-   try/catch around the async adapter call did */
+try/catch around the async adapter call did */
 fn catch<F: FnOnce()>(f: F) -> Result<(), String> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(()) => Ok(()),
@@ -470,22 +671,38 @@ mod tests {
     }
 
     impl AgentAdapter for FakeAdapter {
-        fn id(&self) -> &str { "fake" }
-        fn name(&self) -> &str { "Fake" }
-        fn capabilities(&self) -> Capabilities { self.caps.clone() }
-        fn detect(&self) -> bool { true }
+        fn id(&self) -> &str {
+            "fake"
+        }
+        fn name(&self) -> &str {
+            "Fake"
+        }
+        fn capabilities(&self) -> Capabilities {
+            self.caps.clone()
+        }
+        fn detect(&self) -> bool {
+            true
+        }
         fn list(&self, kind: ResourceKind) -> ListMap {
             self.entries.get(&kind).cloned().unwrap_or_default()
         }
         fn write(&self, _k: ResourceKind, _id: String, _n: String, _d: ResourceDef) {}
         fn remove(&self, _k: ResourceKind, _id: String, _d: Option<&ResourceDef>) {}
-        fn model_settings(&self) -> Option<&crate::agents::types::ModelSettingsCap> { None }
-        fn config_path(&self) -> Option<String> { None }
+        fn model_settings(&self) -> Option<&crate::agents::types::ModelSettingsCap> {
+            None
+        }
+        fn config_path(&self) -> Option<String> {
+            None
+        }
     }
 
     fn mem_def(ws: Option<&str>, content: &str) -> ResourceDef {
         ResourceDef::Memory(MemoryDef {
-            scope: if ws.is_some() { MemoryScope::Project } else { MemoryScope::Global },
+            scope: if ws.is_some() {
+                MemoryScope::Project
+            } else {
+                MemoryScope::Global
+            },
             workspace_path: ws.map(str::to_string),
             content: content.to_string(),
         })
@@ -493,7 +710,13 @@ mod tests {
 
     #[test]
     fn blank_scope_is_global_only_for_memory() {
-        assert_eq!(blank(ResourceKind::Memory, "m1".into()).item.scope.as_deref(), Some("global"));
+        assert_eq!(
+            blank(ResourceKind::Memory, "m1".into())
+                .item
+                .scope
+                .as_deref(),
+            Some("global")
+        );
         assert_eq!(blank(ResourceKind::Skills, "s1".into()).item.scope, None);
         assert_eq!(blank(ResourceKind::Mcp, "c1".into()).item.scope, None);
         assert_eq!(blank(ResourceKind::Memory, "m1".into()).item.status, "off");
@@ -511,7 +734,9 @@ mod tests {
             workspace_path: None,
             content: None,
             instructions: None,
-            config_json: Some(r#"{"command":"npx","args":["-y","@mcp/db"],"env":{"K":"V"}}"#.into()),
+            config_json: Some(
+                r#"{"command":"npx","args":["-y","@mcp/db"],"env":{"K":"V"}}"#.into(),
+            ),
         };
         match def_from_build(&p).unwrap() {
             ResourceDef::Mcp(c) => {
@@ -526,22 +751,41 @@ mod tests {
     #[test]
     fn def_from_build_mcp_rejects_bad_json_and_missing_command() {
         let mut p = ResourceSavePayload {
-            kind: ResourceKind::Mcp, id: None, name: "x".into(), agent_ids: vec![],
-            enabled: true, scope: None, workspace_path: None, content: None,
-            instructions: None, config_json: Some("not json".into()),
+            kind: ResourceKind::Mcp,
+            id: None,
+            name: "x".into(),
+            agent_ids: vec![],
+            enabled: true,
+            scope: None,
+            workspace_path: None,
+            content: None,
+            instructions: None,
+            config_json: Some("not json".into()),
         };
-        assert_eq!(def_from_build(&p).unwrap_err(), "Configuration must be valid JSON.");
+        assert_eq!(
+            def_from_build(&p).unwrap_err(),
+            "Configuration must be valid JSON."
+        );
         p.config_json = Some(r#"{"args":[]}"#.into());
-        assert_eq!(def_from_build(&p).unwrap_err(), "Configuration must include a \"command\" string.");
+        assert_eq!(
+            def_from_build(&p).unwrap_err(),
+            "Configuration must include a \"command\" string."
+        );
     }
 
     #[test]
     fn def_from_build_memory_keeps_project_workspace() {
         let p = ResourceSavePayload {
-            kind: ResourceKind::Memory, id: None, name: "m".into(), agent_ids: vec![],
-            enabled: true, scope: Some("project".into()),
-            workspace_path: Some(Some("/ws".into())), content: Some(" body\r\n\r\n ".into()),
-            instructions: None, config_json: None,
+            kind: ResourceKind::Memory,
+            id: None,
+            name: "m".into(),
+            agent_ids: vec![],
+            enabled: true,
+            scope: Some("project".into()),
+            workspace_path: Some(Some("/ws".into())),
+            content: Some(" body\r\n\r\n ".into()),
+            instructions: None,
+            config_json: None,
         };
         match def_from_build(&p).unwrap() {
             ResourceDef::Memory(m) => {
@@ -557,9 +801,16 @@ mod tests {
     fn def_from_build_skills_truncates_description_to_100_chars() {
         let long: String = "x".repeat(150);
         let p = ResourceSavePayload {
-            kind: ResourceKind::Skills, id: None, name: "s".into(), agent_ids: vec![],
-            enabled: true, scope: None, workspace_path: None, content: None,
-            instructions: Some(long.clone()), config_json: None,
+            kind: ResourceKind::Skills,
+            id: None,
+            name: "s".into(),
+            agent_ids: vec![],
+            enabled: true,
+            scope: None,
+            workspace_path: None,
+            content: None,
+            instructions: Some(long.clone()),
+            config_json: None,
         };
         match def_from_build(&p).unwrap() {
             ResourceDef::Skill(s) => assert_eq!(s.description.chars().count(), 100),
@@ -571,35 +822,57 @@ mod tests {
     fn merged_blends_live_and_shadow_and_live_wins() {
         let mut entries = HashMap::new();
         let mut mem_list: ListMap = HashMap::new();
-        mem_list.insert("m1".into(), ListedEntry {
-            def: mem_def(None, "live content"),
-            updated_at: 200,
-            name: Some("Memory One".into()),
-        });
+        mem_list.insert(
+            "m1".into(),
+            ListedEntry {
+                def: mem_def(None, "live content"),
+                updated_at: 200,
+                name: Some("Memory One".into()),
+            },
+        );
         let skills_list: ListMap = HashMap::new();
         entries.insert(ResourceKind::Memory, mem_list);
         entries.insert(ResourceKind::Skills, skills_list.clone());
         entries.insert(ResourceKind::Mcp, HashMap::new());
-        let fake = FakeAdapter { entries, caps: Capabilities { memory: true, skills: false, mcp: false } };
+        let fake = FakeAdapter {
+            entries,
+            caps: Capabilities {
+                memory: true,
+                skills: false,
+                mcp: false,
+            },
+        };
         let adapters: Vec<Box<dyn AgentAdapter>> = vec![Box::new(fake)];
 
         /* shadow has m1 (should lose to live) and a skills row (no live, kept) */
         let mut shadow: ShadowStore = HashMap::new();
         let mut per_kind: HashMap<ResourceKind, HashMap<String, ResourceSnapshot>> = HashMap::new();
         let mut mem_snaps = HashMap::new();
-        mem_snaps.insert("m1".into(), ResourceSnapshot {
-            kind: ResourceKind::Memory,
-            name: "Memory One".into(),
-            updated_at: 999,
-            data: serde_json::json!({ "scope": "global", "content": "shadow content" }).as_object().cloned().unwrap(),
-        });
+        mem_snaps.insert(
+            "m1".into(),
+            ResourceSnapshot {
+                kind: ResourceKind::Memory,
+                name: "Memory One".into(),
+                updated_at: 999,
+                data: serde_json::json!({ "scope": "global", "content": "shadow content" })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+            },
+        );
         let mut skill_snaps = HashMap::new();
-        skill_snaps.insert("s1".into(), ResourceSnapshot {
-            kind: ResourceKind::Skills,
-            name: "Skill One".into(),
-            updated_at: 50,
-            data: serde_json::json!({ "description": "d", "instructions": "i" }).as_object().cloned().unwrap(),
-        });
+        skill_snaps.insert(
+            "s1".into(),
+            ResourceSnapshot {
+                kind: ResourceKind::Skills,
+                name: "Skill One".into(),
+                updated_at: 50,
+                data: serde_json::json!({ "description": "d", "instructions": "i" })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+            },
+        );
         per_kind.insert(ResourceKind::Memory, mem_snaps);
         per_kind.insert(ResourceKind::Skills, skill_snaps);
         shadow.insert("fake".into(), per_kind);
@@ -617,17 +890,30 @@ mod tests {
     #[test]
     fn merged_reports_off_when_only_shadow_holds_the_item() {
         let entries = HashMap::new();
-        let fake = FakeAdapter { entries, caps: Capabilities { memory: true, skills: true, mcp: false } };
+        let fake = FakeAdapter {
+            entries,
+            caps: Capabilities {
+                memory: true,
+                skills: true,
+                mcp: false,
+            },
+        };
         let adapters: Vec<Box<dyn AgentAdapter>> = vec![Box::new(fake)];
         let mut shadow: ShadowStore = HashMap::new();
         let mut per_kind: HashMap<ResourceKind, HashMap<String, ResourceSnapshot>> = HashMap::new();
         let mut mem_snaps = HashMap::new();
-        mem_snaps.insert("ghost".into(), ResourceSnapshot {
-            kind: ResourceKind::Memory,
-            name: "Ghost".into(),
-            updated_at: 1,
-            data: serde_json::json!({ "content": "c" }).as_object().cloned().unwrap(),
-        });
+        mem_snaps.insert(
+            "ghost".into(),
+            ResourceSnapshot {
+                kind: ResourceKind::Memory,
+                name: "Ghost".into(),
+                updated_at: 1,
+                data: serde_json::json!({ "content": "c" })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+            },
+        );
         per_kind.insert(ResourceKind::Memory, mem_snaps);
         shadow.insert("fake".into(), per_kind);
 

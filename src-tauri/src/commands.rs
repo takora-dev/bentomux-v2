@@ -1,9 +1,9 @@
 /* ---------------- IPC command surface (the only bridge into the backend) ----------------
-   Rust port of src/main/ipc.ts + workspaces.ts. Commands keep the camelCase
-   names the Electron preload used (get_state, workspace_add, tab_create,
-   ...) so the renderer's invoke() calls map 1:1 without a rename layer.
-   Phases 5-9 bodies (git/agents/bridge/remote) are wired in their own
-   phases; git + agent shims compile in already. */
+Rust port of src/main/ipc.ts + workspaces.ts. Commands keep the camelCase
+names the Electron preload used (get_state, workspace_add, tab_create,
+...) so the renderer's invoke() calls map 1:1 without a rename layer.
+Phases 5-9 bodies (git/agents/bridge/remote) are wired in their own
+phases; git + agent shims compile in already. */
 
 use tauri::Emitter;
 use tauri::Manager;
@@ -14,7 +14,9 @@ use crate::split_tree::{
     first_leaf_id, leaf_ids, leaf_node, new_node_key, remove_leaf, set_split_dir, split_leaf,
     tree_has_key, tree_has_leaf, Dir, PaneNode,
 };
-use crate::state::{AppState, AppStateManager, OverlaySize, Prefs, RemotePrefs, TabRec, WorkspaceRec};
+use crate::state::{
+    AppState, AppStateManager, OverlaySize, Prefs, RemotePrefs, TabRec, WorkspaceRec,
+};
 use std::collections::HashMap;
 
 /* the renderer can address any tab by any of its pane ids */
@@ -68,21 +70,22 @@ pub fn prefs_update(partial: serde_json::Value, state: State<'_, AppStateManager
     state.patch_prefs(|cur| merge_prefs(cur, &partial))
 }
 
-
 fn merge_prefs(cur: &mut Prefs, p: &serde_json::Value) {
     let obj = p.as_object();
-    if obj.is_none() { return; }
+    if obj.is_none() {
+        return;
+    }
     let obj = obj.unwrap();
-    
+
     // Handle font specially: explicit null clears it
     if let Some(font_val) = obj.get("font") {
-        cur.font = if font_val.is_null() { 
-            None 
-        } else { 
+        cur.font = if font_val.is_null() {
+            None
+        } else {
             font_val.as_str().map(|s| s.to_string())
         };
     }
-    
+
     // Other fields: only update if present and non-null
     if let Some(v) = obj.get("theme").and_then(|v| v.as_str()) {
         cur.theme = Some(v.to_string());
@@ -108,7 +111,7 @@ fn merge_prefs(cur: &mut Prefs, p: &serde_json::Value) {
     if let Some(v) = obj.get("notifSound").and_then(|v| v.as_bool()) {
         cur.notif_sound = Some(v);
     }
-    
+
     // Complex fields
     if let Some(v) = obj.get("shortcuts") {
         if let Ok(m) = serde_json::from_value::<HashMap<String, String>>(v.clone()) {
@@ -148,8 +151,8 @@ fn merge_prefs(cur: &mut Prefs, p: &serde_json::Value) {
 const MAX_RECENT_FOLDERS: usize = 8;
 
 /* newest first, no case-insensitive duplicates, folders that vanished from
-   disk pruned. Called from workspace_add so every path that opens a folder
-   (sidebar menu, compact button, welcome CTA, plugin facade) is recorded. */
+disk pruned. Called from workspace_add so every path that opens a folder
+(sidebar menu, compact button, welcome CTA, plugin facade) is recorded. */
 fn remember_recent(prefs: &mut Prefs, path: &str) {
     let norm = normalized_path(path);
     let mut list: Vec<String> = prefs
@@ -166,9 +169,9 @@ fn remember_recent(prefs: &mut Prefs, path: &str) {
 }
 
 /* native folder picker; returns the absolute path of the chosen folder or
-   null when the user cancels. rfd opens its own OS dialog (no Tauri
-   plugin/capability required). Blocking here is fine — the renderer awaits
-   the response the same way it awaited Electron's dialog.showOpenDialog. */
+null when the user cancels. rfd opens its own OS dialog (no Tauri
+plugin/capability required). Blocking here is fine — the renderer awaits
+the response the same way it awaited Electron's dialog.showOpenDialog. */
 #[tauri::command]
 pub fn workspace_choose() -> Option<String> {
     rfd::FileDialog::new()
@@ -207,14 +210,22 @@ pub fn workspace_add(path: String, state: State<'_, AppStateManager>) -> AppStat
     // git watcher + branch hook wired in Phase 5 (git.rs).
     crate::git::watch_workspace(&id, &norm);
     state.patch_state(|s| {
-        s.workspaces.push(WorkspaceRec { id, path: norm.clone(), name });
+        s.workspaces.push(WorkspaceRec {
+            id,
+            path: norm.clone(),
+            name,
+        });
         s.active_workspace_id = Some(ws_id);
         remember_recent(&mut s.prefs, &norm);
     })
 }
 
 #[tauri::command]
-pub fn workspace_remove(id: String, state: State<'_, AppStateManager>, pty: State<'_, PtyManager>) -> AppState {
+pub fn workspace_remove(
+    id: String,
+    state: State<'_, AppStateManager>,
+    pty: State<'_, PtyManager>,
+) -> AppState {
     pty.kill_terms_for_workspace(&id);
     crate::git::unwatch_workspace(&id);
     state.patch_state(|s| {
@@ -227,15 +238,18 @@ pub fn workspace_remove(id: String, state: State<'_, AppStateManager>, pty: Stat
 }
 
 /* the renderer sends the full workspace-id order after a drag & drop;
-   anything but an exact permutation of the current ids is rejected */
+anything but an exact permutation of the current ids is rejected */
 #[tauri::command]
 pub fn workspace_reorder(ids: Vec<String>, state: State<'_, AppStateManager>) -> AppState {
     let cur = state.get_state();
     if ids.len() != cur.workspaces.len() {
         return cur;
     }
-    let by_id: std::collections::HashMap<_, _> =
-        cur.workspaces.iter().map(|w| (w.id.clone(), w.clone())).collect();
+    let by_id: std::collections::HashMap<_, _> = cur
+        .workspaces
+        .iter()
+        .map(|w| (w.id.clone(), w.clone()))
+        .collect();
     let mut ordered = Vec::with_capacity(ids.len());
     for id in &ids {
         match by_id.get(id) {
@@ -252,7 +266,11 @@ pub fn tab_reorder(ids: Vec<String>, state: State<'_, AppStateManager>) -> AppSt
     if ids.len() != cur.open_tabs.len() {
         return cur;
     }
-    let by_id: HashMap<_, _> = cur.open_tabs.iter().map(|t| (t.id.clone(), t.clone())).collect();
+    let by_id: HashMap<_, _> = cur
+        .open_tabs
+        .iter()
+        .map(|t| (t.id.clone(), t.clone()))
+        .collect();
     let mut seen = std::collections::HashSet::with_capacity(ids.len());
     let mut ordered = Vec::with_capacity(ids.len());
     for id in &ids {
@@ -309,7 +327,12 @@ fn create_tab(
             title: inherited.clone(),
         });
     });
-    Ok(TabRec { id: term_id, workspace_id: workspace_id.to_string(), split_tree: None, title: inherited })
+    Ok(TabRec {
+        id: term_id,
+        workspace_id: workspace_id.to_string(),
+        split_tree: None,
+        title: inherited,
+    })
 }
 
 #[tauri::command]
@@ -319,8 +342,8 @@ pub fn tab_restore(state: State<'_, AppStateManager>, pty: State<'_, PtyManager>
         (s.workspaces, s.open_tabs)
     };
     /* start git HEAD watchers for every persisted workspace; without this
-       a restored session never receives branch-change events because
-       watch_workspace is only called on workspace_add / tab_create / tab_split */
+    a restored session never receives branch-change events because
+    watch_workspace is only called on workspace_add / tab_create / tab_split */
     for ws in &workspaces {
         crate::git::watch_workspace(&ws.id, &ws.path);
     }
@@ -330,7 +353,11 @@ pub fn tab_restore(state: State<'_, AppStateManager>, pty: State<'_, PtyManager>
 }
 
 #[tauri::command]
-pub fn tab_create(workspace_id: String, state: State<'_, AppStateManager>, pty: State<'_, PtyManager>) -> Result<TabRec, String> {
+pub fn tab_create(
+    workspace_id: String,
+    state: State<'_, AppStateManager>,
+    pty: State<'_, PtyManager>,
+) -> Result<TabRec, String> {
     create_tab(&workspace_id, &state, &pty)
 }
 
@@ -364,7 +391,11 @@ pub fn tab_split(
     let tree = split_leaf(
         tree_of(&rec),
         &pane_id,
-        if dir.as_deref() == Some("h") { Dir::H } else { Dir::V },
+        if dir.as_deref() == Some("h") {
+            Dir::H
+        } else {
+            Dir::V
+        },
         &term_id,
         &key.unwrap_or_else(new_node_key),
     );
@@ -372,10 +403,21 @@ pub fn tab_split(
         s.open_tabs = s
             .open_tabs
             .iter()
-            .map(|r| if r == &rec { rec_with_tree(r, Some(tree.clone())) } else { r.clone() })
+            .map(|r| {
+                if r == &rec {
+                    rec_with_tree(r, Some(tree.clone()))
+                } else {
+                    r.clone()
+                }
+            })
             .collect();
     });
-    Ok(TabRec { id: term_id, workspace_id: rec.workspace_id, split_tree: None, title: rec.title })
+    Ok(TabRec {
+        id: term_id,
+        workspace_id: rec.workspace_id,
+        split_tree: None,
+        title: rec.title,
+    })
 }
 
 #[tauri::command]
@@ -394,11 +436,18 @@ pub fn tab_rename(pane_id: String, raw_title: String, state: State<'_, AppStateM
                     return r.clone();
                 }
                 let mut out = r.clone();
-                out.title = if title.is_empty() { None } else { Some(title.clone()) };
+                out.title = if title.is_empty() {
+                    None
+                } else {
+                    Some(title.clone())
+                };
                 out
             })
             .collect();
-        let titles = s.prefs.tab_titles.get_or_insert_with(std::collections::HashMap::new);
+        let titles = s
+            .prefs
+            .tab_titles
+            .get_or_insert_with(std::collections::HashMap::new);
         if title.is_empty() {
             titles.remove(&workspace_id);
         } else {
@@ -414,23 +463,42 @@ pub fn tab_set_dir(node_key: String, dir: String, state: State<'_, AppStateManag
         .get_state()
         .open_tabs
         .iter()
-        .find(|r| r.split_tree.as_ref().is_some_and(|t| tree_has_key(t, &node_key)))
+        .find(|r| {
+            r.split_tree
+                .as_ref()
+                .is_some_and(|t| tree_has_key(t, &node_key))
+        })
         .cloned();
     let Some(rec) = rec else { return };
     let tab_id = rec.id.clone();
-    let Some(tree) = rec.split_tree.clone() else { return };
+    let Some(tree) = rec.split_tree.clone() else {
+        return;
+    };
     let new_tree = set_split_dir(tree, &node_key, d);
     state.patch_state(|s| {
         s.open_tabs = s
             .open_tabs
             .iter()
-            .map(|r| if r.id == tab_id { TabRec { split_tree: Some(new_tree.clone()), ..r.clone() } } else { r.clone() })
+            .map(|r| {
+                if r.id == tab_id {
+                    TabRec {
+                        split_tree: Some(new_tree.clone()),
+                        ..r.clone()
+                    }
+                } else {
+                    r.clone()
+                }
+            })
             .collect();
     });
 }
 
 #[tauri::command]
-pub fn tab_close_pane(pane_id: String, state: State<'_, AppStateManager>, pty: State<'_, PtyManager>) -> AppState {
+pub fn tab_close_pane(
+    pane_id: String,
+    state: State<'_, AppStateManager>,
+    pty: State<'_, PtyManager>,
+) -> AppState {
     let cur = state.get_state();
     pty.kill_term(&pane_id);
     let rec = find_rec_by_pane(&cur, &pane_id).cloned();
@@ -461,14 +529,21 @@ pub fn tab_close_pane(pane_id: String, state: State<'_, AppStateManager>, pty: S
         }
         None => {
             /* not a tab: wipe any leftover record matching the pane id directly */
-            state.patch_state(|s| s.open_tabs.retain(|t| t.id != pane_id && t.workspace_id != pane_id));
+            state.patch_state(|s| {
+                s.open_tabs
+                    .retain(|t| t.id != pane_id && t.workspace_id != pane_id)
+            });
             state.get_state()
         }
     }
 }
 
 #[tauri::command]
-pub fn tab_close(id: String, state: State<'_, AppStateManager>, pty: State<'_, PtyManager>) -> AppState {
+pub fn tab_close(
+    id: String,
+    state: State<'_, AppStateManager>,
+    pty: State<'_, PtyManager>,
+) -> AppState {
     let cur = state.get_state();
     let rec = find_rec_by_pane(&cur, &id).cloned();
     match rec {
@@ -494,17 +569,22 @@ pub fn pty_write(id: String, data: String, pty: State<'_, PtyManager>) -> Result
 }
 
 #[tauri::command]
-pub fn pty_resize(id: String, cols: u16, rows: u16, pty: State<'_, PtyManager>) -> Result<(), String> {
+pub fn pty_resize(
+    id: String,
+    cols: u16,
+    rows: u16,
+    pty: State<'_, PtyManager>,
+) -> Result<(), String> {
     pty.resize_term(&id, cols, rows)
 }
 
 /* ---------------- git ---------------- */
 
 /* every git op shells out and blocks (`status -uall` walks the whole worktree,
-   `push` waits on the network for up to 120s). A non-async #[tauri::command]
-   runs on the app main thread, so the WebView froze until git returned; these
-   hop to the blocking pool instead and the renderer paints its loading state
-   while the invoke is in flight. */
+`push` waits on the network for up to 120s). A non-async #[tauri::command]
+runs on the app main thread, so the WebView froze until git returned; these
+hop to the blocking pool instead and the renderer paints its loading state
+while the invoke is in flight. */
 async fn git_off_main<T, F>(f: F) -> Result<T, String>
 where
     F: FnOnce() -> T + Send + 'static,
@@ -516,46 +596,70 @@ where
 }
 
 #[tauri::command]
-pub async fn git_status(workspace_id: String, state: State<'_, AppStateManager>) -> Result<crate::git::GitStatusResult, String> {
+pub async fn git_status(
+    workspace_id: String,
+    state: State<'_, AppStateManager>,
+) -> Result<crate::git::GitStatusResult, String> {
     let path = workspace_path(&workspace_id, &state)?;
     git_off_main(move || crate::git::status(&path)).await
 }
 
 #[tauri::command]
-pub async fn git_diff(workspace_id: String, path: Option<String>, state: State<'_, AppStateManager>) -> Result<crate::git::GitDiffResult, String> {
+pub async fn git_diff(
+    workspace_id: String,
+    path: Option<String>,
+    state: State<'_, AppStateManager>,
+) -> Result<crate::git::GitDiffResult, String> {
     let ws_path = workspace_path(&workspace_id, &state)?;
     git_off_main(move || crate::git::diff(&ws_path, path.as_deref())).await
 }
 
 #[tauri::command]
-pub async fn git_diff_stat(workspace_id: String, state: State<'_, AppStateManager>) -> Result<crate::git::GitDiffStatResult, String> {
+pub async fn git_diff_stat(
+    workspace_id: String,
+    state: State<'_, AppStateManager>,
+) -> Result<crate::git::GitDiffStatResult, String> {
     let path = workspace_path(&workspace_id, &state)?;
     git_off_main(move || crate::git::diff_stat(&path)).await
 }
 
 #[tauri::command]
-pub async fn git_push(workspace_id: String, set_upstream: bool, state: State<'_, AppStateManager>) -> Result<crate::git::GitCommandResult, String> {
+pub async fn git_push(
+    workspace_id: String,
+    set_upstream: bool,
+    state: State<'_, AppStateManager>,
+) -> Result<crate::git::GitCommandResult, String> {
     let path = workspace_path(&workspace_id, &state)?;
     git_off_main(move || crate::git::push(&path, set_upstream)).await
 }
 
 #[tauri::command]
-pub async fn git_remote_info(workspace_id: String, state: State<'_, AppStateManager>) -> Result<crate::git::GitRemoteInfo, String> {
+pub async fn git_remote_info(
+    workspace_id: String,
+    state: State<'_, AppStateManager>,
+) -> Result<crate::git::GitRemoteInfo, String> {
     let path = workspace_path(&workspace_id, &state)?;
     git_off_main(move || crate::git::remote_info(&path)).await
 }
 
 #[tauri::command]
-pub async fn git_history(workspace_id: String, state: State<'_, AppStateManager>) -> Result<crate::git::GitHistoryResult, String> {
+pub async fn git_history(
+    workspace_id: String,
+    state: State<'_, AppStateManager>,
+) -> Result<crate::git::GitHistoryResult, String> {
     let path = workspace_path(&workspace_id, &state)?;
     git_off_main(move || crate::git::history(&path)).await
 }
 
 #[tauri::command]
-pub async fn git_show(workspace_id: String, oid: String, state: State<'_, AppStateManager>) -> Result<crate::git::GitCommitDetail, String> {
+pub async fn git_show(
+    workspace_id: String,
+    oid: String,
+    state: State<'_, AppStateManager>,
+) -> Result<crate::git::GitCommitDetail, String> {
     let path = workspace_path(&workspace_id, &state)?;
     /* `detail` is the one git reader that returns a Result, so the two layers of
-       error are flattened here rather than swallowed */
+    error are flattened here rather than swallowed */
     git_off_main(move || crate::git::detail(&path, &oid)).await?
 }
 
@@ -564,7 +668,10 @@ pub fn git_branch_for(path: String) -> Result<Option<String>, String> {
     crate::git::branch_for(&path)
 }
 
-fn workspace_path(workspace_id: &str, state: &State<'_, AppStateManager>) -> Result<String, String> {
+fn workspace_path(
+    workspace_id: &str,
+    state: &State<'_, AppStateManager>,
+) -> Result<String, String> {
     state
         .get_state()
         .workspaces
@@ -586,9 +693,11 @@ pub fn agents_list(state: State<'_, AppStateManager>) -> Vec<AgentInfo> {
 }
 
 #[tauri::command]
-pub fn agents_config(agent_id: String, state: State<'_, AppStateManager>) -> crate::runtime::AgentConfigView {
-    crate::runtime::agent_config_view(&state.get_state().workspaces, &agent_id)
-        .unwrap_or_default()
+pub fn agents_config(
+    agent_id: String,
+    state: State<'_, AppStateManager>,
+) -> crate::runtime::AgentConfigView {
+    crate::runtime::agent_config_view(&state.get_state().workspaces, &agent_id).unwrap_or_default()
 }
 
 #[tauri::command]
@@ -611,7 +720,7 @@ pub fn agent_hooks_status() -> crate::runtime::AgentHooksStatus {
 }
 
 /* the hook CLI is unpacked next to the binary as a Tauri resource; Node
-   itself is guaranteed on the machine because Claude Code requires it */
+itself is guaranteed on the machine because Claude Code requires it */
 #[tauri::command]
 pub fn agent_hooks_install(app: tauri::AppHandle) -> crate::runtime::AgentHooksStatus {
     crate::runtime::agent_hooks_install(&crate::bridge::hook_script_path(&app))
@@ -642,7 +751,7 @@ pub fn agent_approval_pending() -> Option<crate::bridge::AgentApprovalRequest> {
 }
 
 /* overlay Jump: hide the approval window first, then explicitly foreground
-   Bentomux so the click cannot leave the always-on-top overlay in front. */
+Bentomux so the click cannot leave the always-on-top overlay in front. */
 #[tauri::command]
 pub fn agent_approval_jump(app: tauri::AppHandle, pane_id: Option<String>, cwd: Option<String>) {
     if let Some(overlay) = app.get_webview_window("approval-overlay") {
@@ -687,7 +796,7 @@ pub fn agent_approval_hide(app: tauri::AppHandle) {
 }
 
 /* report the active terminal tab's anchor pane so the approval overlay
-   can stay hidden while that tab is on screen */
+can stay hidden while that tab is on screen */
 #[tauri::command]
 pub fn agent_set_active_tab(tab_id: Option<String>) {
     crate::bridge::set_active_tab_anchor(tab_id);
@@ -696,7 +805,10 @@ pub fn agent_set_active_tab(tab_id: Option<String>) {
 /* ---------------- resources (memory / skills / MCP) ---------------- */
 
 #[tauri::command]
-pub fn res_list(kind: crate::state::ResourceKind, state: State<'_, AppStateManager>) -> Vec<crate::agents::resources::ResourceItem> {
+pub fn res_list(
+    kind: crate::state::ResourceKind,
+    state: State<'_, AppStateManager>,
+) -> Vec<crate::agents::resources::ResourceItem> {
     let workspaces = state.get_state().workspaces.clone();
     crate::agents::resources::list_resources(&workspaces, kind, &state)
 }
@@ -734,7 +846,10 @@ pub fn res_toggle(
 /* ---------------- remote monitor (phone browser) ---------------- */
 
 #[tauri::command]
-pub fn remote_info(_app: tauri::AppHandle, state: State<'_, AppStateManager>) -> crate::remote::RemotePairing {
+pub fn remote_info(
+    _app: tauri::AppHandle,
+    state: State<'_, AppStateManager>,
+) -> crate::remote::RemotePairing {
     crate::remote::pairing_info(&state)
 }
 
@@ -772,9 +887,9 @@ pub fn win_toggle_maximize(window: tauri::Window, app: tauri::AppHandle) {
         window.unmaximize()
     };
     /* keep the shared maximize-state guard in sync so the OS-driven
-       Resized handler does not double-emit on the same transition; emit
-       directly so programmatic toggles (e.g. the titlebar maxBtn) also
-       notify the renderer, mirroring Electron's win.on('maximize'). */
+    Resized handler does not double-emit on the same transition; emit
+    directly so programmatic toggles (e.g. the titlebar maxBtn) also
+    notify the renderer, mirroring Electron's win.on('maximize'). */
     if let Some(state) = app.try_state::<crate::WindowMaxState>() {
         state.0.store(now_max, std::sync::atomic::Ordering::SeqCst);
     }
@@ -793,8 +908,8 @@ pub fn win_close(window: tauri::Window) {
 }
 
 /* Quit for real. The default quit deliberately leaves the pty host daemon and
-   its panes running, so this is the escape hatch for "I want nothing left
-   behind": stop every pane, stop the daemon, then exit the app. */
+its panes running, so this is the escape hatch for "I want nothing left
+behind": stop every pane, stop the daemon, then exit the app. */
 #[tauri::command]
 pub fn app_quit(stop_panes: bool, pty: State<'_, PtyManager>, app: tauri::AppHandle) {
     if stop_panes {
@@ -804,21 +919,28 @@ pub fn app_quit(stop_panes: bool, pty: State<'_, PtyManager>, app: tauri::AppHan
 }
 
 /* Kill cloudflared and the remote HTTP server before the NSIS/MSI installer
-   overwrites cloudflared.exe, and stop the pty host: on Windows the installer
-   cannot replace a running exe, and the host is that exe. Called by the
-   renderer immediately before tauri-plugin-updater's downloadAndInstall(). */
+overwrites cloudflared.exe, and stop the pty host: on Windows the installer
+cannot replace a running exe, and the host is that exe. Called by the
+renderer immediately before tauri-plugin-updater's install().
+
+Only Windows needs any of it: the lock is on a file the installer rewrites.
+macOS/Linux unlink the old bundle and leave running processes alone, so the
+daemon — and every live pane in it — is left running. */
 #[tauri::command]
 pub fn shutdown_for_update(pty: State<'_, PtyManager>) {
+    if !cfg!(target_os = "windows") {
+        return;
+    }
     pty.shutdown_host();
     crate::remote::stop_tunnel();
     crate::remote::stop_remote();
 }
 
 /* Stage pasted clipboard bytes as a temp file and return the absolute path.
-   A WebView hands the renderer clipboard files without any filesystem path,
-   so copying the bytes out is the only way a pasted screenshot or file
-   becomes something the shell/agent can actually open. The renderer sends
-   the clipboard's own filename so the extension survives. */
+A WebView hands the renderer clipboard files without any filesystem path,
+so copying the bytes out is the only way a pasted screenshot or file
+becomes something the shell/agent can actually open. The renderer sends
+the clipboard's own filename so the extension survives. */
 const CLIPBOARD_TEMP_PREFIX: &str = "bentomux-clipboard-";
 const CLIPBOARD_TEMP_MAX_AGE: std::time::Duration =
     std::time::Duration::from_secs(7 * 24 * 60 * 60);
@@ -826,7 +948,9 @@ const CLIPBOARD_TEMP_MAX_AGE: std::time::Duration =
 pub fn cleanup_clipboard_temp_files() {
     let temp_dir = std::env::temp_dir();
     let cutoff = std::time::SystemTime::now().checked_sub(CLIPBOARD_TEMP_MAX_AGE);
-    let Ok(entries) = std::fs::read_dir(temp_dir) else { return };
+    let Ok(entries) = std::fs::read_dir(temp_dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let is_clipboard_file = path
@@ -864,14 +988,20 @@ pub fn temp_write_file(name: String, data: String) -> Result<String, String> {
 }
 
 /* the name comes from the OS clipboard, i.e. from outside the app: collapse
-   path separators so the result can never climb out of the temp dir, and fall
-   back to a fixed suffix when nothing name-like is left. `create()` may still
-   reject a Windows-reserved name (CON, NUL, a stray ':'), which surfaces as an
-   error and makes the renderer paste the bare name instead of a path. */
+path separators so the result can never climb out of the temp dir, and fall
+back to a fixed suffix when nothing name-like is left. `create()` may still
+reject a Windows-reserved name (CON, NUL, a stray ':'), which surfaces as an
+error and makes the renderer paste the bare name instead of a path. */
 pub(crate) fn safe_temp_name(name: &str) -> String {
     let flat: String = name
         .chars()
-        .map(|c| if std::path::is_separator(c) || c == '\0' { '_' } else { c })
+        .map(|c| {
+            if std::path::is_separator(c) || c == '\0' {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let trimmed = flat.trim();
     if trimmed.is_empty() || trimmed.chars().all(|c| c == '.') {
@@ -893,8 +1023,10 @@ mod tests {
     #[test]
     fn keeps_extension_and_flattens_traversal() {
         assert_eq!(safe_temp_name("image.png"), "image.png");
-        assert_eq!(safe_temp_name("Screenshot 2026-09-15 at 12.49.20.png"),
-                   "Screenshot 2026-09-15 at 12.49.20.png");
+        assert_eq!(
+            safe_temp_name("Screenshot 2026-09-15 at 12.49.20.png"),
+            "Screenshot 2026-09-15 at 12.49.20.png"
+        );
         /* separators cannot survive, so the result can never leave temp_dir */
         assert_eq!(safe_temp_name("../../etc/passwd"), ".._.._etc_passwd");
         assert_eq!(safe_temp_name("/etc/passwd"), "_etc_passwd");
@@ -910,7 +1042,7 @@ mod tests {
     }
 
     /* remember_recent only keeps paths that still exist on disk, so the test
-       works against real (temporary) directories. */
+    works against real (temporary) directories. */
     fn temp_dirs(tag: &str, count: usize) -> (std::path::PathBuf, Vec<String>) {
         let root = std::env::temp_dir().join(format!(
             "bentomux-recent-{}-{}-{}",

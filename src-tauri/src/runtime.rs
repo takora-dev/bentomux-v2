@@ -1,7 +1,7 @@
 /* ---------------- agent runtime detection + config views ----------------
-   Phase 6 stub. The shared type contract (AgentInfo, AgentConfigView, etc.)
-   lives here so Phase 4 commands compile; sysinfo process polling and
-   screen-manifest evaluation land in Phase 6. */
+Phase 6 stub. The shared type contract (AgentInfo, AgentConfigView, etc.)
+lives here so Phase 4 commands compile; sysinfo process polling and
+screen-manifest evaluation land in Phase 6. */
 
 use serde::{Deserialize, Serialize};
 
@@ -44,7 +44,13 @@ pub struct ModelSettingsView {
 }
 impl Default for ModelSettingsView {
     fn default() -> Self {
-        ModelSettingsView { model: String::new(), base_url: String::new(), context: String::new(), format: String::new(), has_api_key: false }
+        ModelSettingsView {
+            model: String::new(),
+            base_url: String::new(),
+            context: String::new(),
+            format: String::new(),
+            has_api_key: false,
+        }
     }
 }
 
@@ -128,17 +134,17 @@ pub struct AgentHooksStatus {
 }
 
 /* ---------------- agent runtime poller ----------------
-   Rust port of src/main/runtime.ts — two-layer detection, herdr-style:
-   1. identity — poll the process table (sysinfo), walk each tab's shell
-      descendant tree, match known agent binaries (claude, pi, codex, …)
-   2. state — evaluate screen-manifest rules against a vt100 headless
-      render of the tab's live output; agents without a manifest fall back
-      to an output-activity pulse (recent data = working).
+Rust port of src/main/runtime.ts — two-layer detection, herdr-style:
+1. identity — poll the process table (sysinfo), walk each tab's shell
+   descendant tree, match known agent binaries (claude, pi, codex, …)
+2. state — evaluate screen-manifest rules against a vt100 headless
+   render of the tab's live output; agents without a manifest fall back
+   to an output-activity pulse (recent data = working).
 
-   Wired from `init()` (called once in setup): it stores the app handle,
-   starts the screen feed, and spawns a 2s poller thread. Status is
-   published on `rt:status` when anything changes, and mirrored into
-   `latest` for surfaces outside the renderer (remote monitor). */
+Wired from `init()` (called once in setup): it stores the app handle,
+starts the screen feed, and spawns a 2s poller thread. Status is
+published on `rt:status` when anything changes, and mirrored into
+`latest` for surfaces outside the renderer (remote monitor). */
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -165,7 +171,7 @@ fn runtime_state() -> &'static Mutex<Option<RuntimeState>> {
 const WORKING_PULSE_MS: u64 = 1500;
 
 /* most recent tick's statuses — read by surfaces that don't live in the
-   renderer (remote monitor) */
+renderer (remote monitor) */
 static LATEST: OnceLock<Mutex<BTreeMap<String, RuntimeStatus>>> = OnceLock::new();
 fn latest() -> &'static Mutex<BTreeMap<String, RuntimeStatus>> {
     LATEST.get_or_init(|| Mutex::new(BTreeMap::new()))
@@ -188,9 +194,13 @@ pub fn report_agent_state(pane_id: &str, agent: &str, state: &str, _message: Opt
         "idle" => AgentRunState::Idle,
         _ => return,
     };
-    reported().lock().unwrap().insert(pane_id.to_string(), ReportedAgent {
-        agent: agent.to_string(), state,
-    });
+    reported().lock().unwrap().insert(
+        pane_id.to_string(),
+        ReportedAgent {
+            agent: agent.to_string(),
+            state,
+        },
+    );
 }
 
 pub fn clear_reported_agent(pane_id: &str) {
@@ -206,11 +216,21 @@ fn user_input_at() -> &'static Mutex<HashMap<String, u64>> {
 }
 
 pub fn note_user_input(pane_id: &str) {
-    user_input_at().lock().unwrap().insert(pane_id.to_string(), now_ms());
+    user_input_at()
+        .lock()
+        .unwrap()
+        .insert(pane_id.to_string(), now_ms());
 }
 
 fn input_is_recent(pane_id: &str) -> bool {
-    now_ms().saturating_sub(user_input_at().lock().unwrap().get(pane_id).copied().unwrap_or(0)) < 750
+    now_ms().saturating_sub(
+        user_input_at()
+            .lock()
+            .unwrap()
+            .get(pane_id)
+            .copied()
+            .unwrap_or(0),
+    ) < 750
 }
 
 pub fn latest_runtime_statuses() -> BTreeMap<String, RuntimeStatus> {
@@ -225,7 +245,7 @@ pub fn on_runtime_update(cb: impl Fn(&BTreeMap<String, RuntimeStatus>) + Send + 
 }
 
 /* store the tick + notify the renderer and hook subscribers, but only
-   when something actually changed */
+when something actually changed */
 fn publish(statuses: &BTreeMap<String, RuntimeStatus>) {
     {
         let mut lat = latest().lock().unwrap();
@@ -255,7 +275,10 @@ struct Match {
 }
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /* binary-name matchers, ported verbatim from runtime.ts */
@@ -283,8 +306,8 @@ const NAME_RE: &[(&str, &str)] = &[
 const MINOR_RE: &str = r"^(qwenpaw|qwen|kimi|kilo|droid)(-code)?(\.exe|\.cmd|\.bat)?$";
 
 /* Patterns are compiled once: match_agent runs per descendant process on
-   every runtime tick, so building the 18 binary-name regexes inline meant
-   ~hundreds of regex compilations per second. */
+every runtime tick, so building the 18 binary-name regexes inline meant
+~hundreds of regex compilations per second. */
 fn name_res() -> &'static [(&'static str, regex::Regex)] {
     static RES: OnceLock<Vec<(&'static str, regex::Regex)>> = OnceLock::new();
     RES.get_or_init(|| {
@@ -298,7 +321,8 @@ fn name_res() -> &'static [(&'static str, regex::Regex)] {
 fn claude_cmd_re() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        regex::Regex::new(r#"(^|[\\/"])claude(\.exe)?(["']?\s|$)"#).expect("valid claude wrapper regex")
+        regex::Regex::new(r#"(^|[\\/"])claude(\.exe)?(["']?\s|$)"#)
+            .expect("valid claude wrapper regex")
     })
 }
 
@@ -356,10 +380,10 @@ fn match_agent(name: &str, cmd: Option<&str>) -> Option<&'static str> {
         return Some(agent);
     }
     /* the command-line pass is only reached when the binary name gave no
-       answer, so the lowercased cmd string is built lazily here. Backslashes
-       are folded to `/` so the Windows PEB command line (which keeps the
-       `@scope\pkg` install path as written by the npm shim) matches the same
-       patterns as a POSIX argv. */
+    answer, so the lowercased cmd string is built lazily here. Backslashes
+    are folded to `/` so the Windows PEB command line (which keeps the
+    `@scope\pkg` install path as written by the npm shim) matches the same
+    patterns as a POSIX argv. */
     let c = cmd
         .map(|s| s.to_lowercase().replace('\\', "/"))
         .unwrap_or_default();
@@ -390,13 +414,13 @@ fn match_agent(name: &str, cmd: Option<&str>) -> Option<&'static str> {
         return Some("gemini");
     }
     /* The agent name is not always a bare token. Node CLIs that set
-       `process.title` (pi, omp, …) replace their own argv[0], so on macOS
-       sysinfo reports name="node" with the real name stranded in the argument
-       list ("pi BENTOMUX_BRIDGE=…"); an interpreter-launched CLI keeps
-       argv[0]="node" instead and carries the launcher path
-       ("node /usr/local/bin/codex", measured). Retry the binary-name patterns
-       on the file name of every argument token, and on the npm package
-       directory of an installed package. */
+    `process.title` (pi, omp, …) replace their own argv[0], so on macOS
+    sysinfo reports name="node" with the real name stranded in the argument
+    list ("pi BENTOMUX_BRIDGE=…"); an interpreter-launched CLI keeps
+    argv[0]="node" instead and carries the launcher path
+    ("node /usr/local/bin/codex", measured). Retry the binary-name patterns
+    on the file name of every argument token, and on the npm package
+    directory of an installed package. */
     for token in c.split_whitespace() {
         /* quote marks survive when the arg holding the path was quoted */
         let token = token.trim_matches(|ch| ch == '"' || ch == '\'');
@@ -413,9 +437,9 @@ fn match_agent(name: &str, cmd: Option<&str>) -> Option<&'static str> {
 
 fn snapshot(sys: &mut System) -> Vec<Proc> {
     /* Runtime detection needs parent, name, and command only. Avoid refreshing
-       CPU, memory, disk, cwd, environment, and executable metadata for every
-       process on each tick. The System instance is reused across ticks so the
-       process table is refreshed in place instead of re-enumerated. */
+    CPU, memory, disk, cwd, environment, and executable metadata for every
+    process on each tick. The System instance is reused across ticks so the
+    process table is refreshed in place instead of re-enumerated. */
     sys.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
@@ -435,14 +459,24 @@ fn snapshot(sys: &mut System) -> Vec<Proc> {
             pid: pid.as_u32(),
             ppid: p.parent().map(|pp| pp.as_u32()).unwrap_or(0),
             name: p.name().to_string_lossy().to_string(),
-            cmd: if p.cmd().is_empty() { None } else { Some(p.cmd().iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>().join(" ")) },
+            cmd: if p.cmd().is_empty() {
+                None
+            } else {
+                Some(
+                    p.cmd()
+                        .iter()
+                        .map(|c| c.to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                )
+            },
         })
         .collect()
 }
 
 /* Note: Electron's ps-list resolves cmd via /proc on Linux; on macOS the
-   process name is used and cmd rarely surfaces for the agent wrapper. The
-   binary-name matcher covers both platforms. */
+process name is used and cmd rarely surfaces for the agent wrapper. The
+binary-name matcher covers both platforms. */
 fn deepest_match(start_pid: u32, by_parent: &HashMap<u32, Vec<&Proc>>) -> Option<Match> {
     let mut best: Option<Match> = None;
     let mut seen: HashSet<u32> = HashSet::new();
@@ -461,7 +495,10 @@ fn deepest_match(start_pid: u32, by_parent: &HashMap<u32, Vec<&Proc>>) -> Option
                 next.push(child.pid);
                 if let Some(m) = match_agent(&child.name, child.cmd.as_deref()) {
                     if best.is_none() || depth < best.as_ref().unwrap().depth {
-                        best = Some(Match { agent: m.to_string(), depth });
+                        best = Some(Match {
+                            agent: m.to_string(),
+                            depth,
+                        });
                     }
                 }
             }
@@ -471,11 +508,16 @@ fn deepest_match(start_pid: u32, by_parent: &HashMap<u32, Vec<&Proc>>) -> Option
     best
 }
 
-
 fn status_for(tab_id: &str, match_: Option<Match>) -> RuntimeStatus {
     let Some(m) = match_ else {
         clear_reported_agent(tab_id);
-        return RuntimeStatus { running: false, runtime: None, state: None, matched_rule: None, source: None };
+        return RuntimeStatus {
+            running: false,
+            runtime: None,
+            state: None,
+            matched_rule: None,
+            source: None,
+        };
     };
     let mut base = RuntimeStatus {
         running: true,
@@ -495,19 +537,32 @@ fn status_for(tab_id: &str, match_: Option<Match>) -> RuntimeStatus {
     let manifest = manifest_for(&m.agent);
 
     let Some(manifest) = manifest.as_ref().filter(|_| !lines.is_empty()) else {
-        let working = !input_is_recent(tab_id)
-            && now_ms().saturating_sub(last_data_at) < WORKING_PULSE_MS;
-        base.state = Some(if working { AgentRunState::Working } else { AgentRunState::Idle });
+        let working =
+            !input_is_recent(tab_id) && now_ms().saturating_sub(last_data_at) < WORKING_PULSE_MS;
+        base.state = Some(if working {
+            AgentRunState::Working
+        } else {
+            AgentRunState::Idle
+        });
         base.source = Some("activity".to_string());
         return base;
     };
 
-    let det = rules::evaluate(manifest, &rules::ScreenInput { osc_title, osc_progress, lines });
-
+    let det = rules::evaluate(
+        manifest,
+        &rules::ScreenInput {
+            osc_title,
+            osc_progress,
+            lines,
+        },
+    );
 
     if det.skip_state_update {
         /* transient overlay (transcript view, pickers): hold the previous state */
-        let prev = runtime_state().lock().unwrap().as_ref()
+        let prev = runtime_state()
+            .lock()
+            .unwrap()
+            .as_ref()
             .and_then(|st| st.last_states.get(tab_id))
             .cloned()
             .unwrap_or(AgentRunState::Working);
@@ -544,10 +599,10 @@ pub fn init(app: tauri::AppHandle) {
     }
 
     /* the PTY daemon owns the authoritative terminal parser and publishes
-       immutable snapshots; runtime only evaluates the cached snapshots. */
+    immutable snapshots; runtime only evaluates the cached snapshots. */
     /* per-tab runtime poller. Base cadence stays 1s so status dots feel
-       live, but idle machines back off to 5s: sysinfo refresh + tree walk +
-       manifest eval per tick is the hottest backend loop in the app. */
+    live, but idle machines back off to 5s: sysinfo refresh + tree walk +
+    manifest eval per tick is the hottest backend loop in the app. */
     const BASE_TICK_MS: u64 = 1000;
     const IDLE_TICK_MS: u64 = 5000;
     std::thread::spawn(move || {
@@ -562,9 +617,11 @@ pub fn init(app: tauri::AppHandle) {
                     publish(&last_statuses);
                 }
                 idle_ticks = idle_ticks.saturating_add(1);
-                std::thread::sleep(std::time::Duration::from_millis(
-                    if idle_ticks >= 3 { IDLE_TICK_MS } else { BASE_TICK_MS },
-                ));
+                std::thread::sleep(std::time::Duration::from_millis(if idle_ticks >= 3 {
+                    IDLE_TICK_MS
+                } else {
+                    BASE_TICK_MS
+                }));
                 continue;
             }
             let procs = snapshot(&mut sys);
@@ -576,15 +633,17 @@ pub fn init(app: tauri::AppHandle) {
             for t in &terms {
                 let st = status_for(&t.id, deepest_match(t.pid, &by_parent));
                 if st.state.is_some() {
-                    runtime_state().lock().unwrap().as_mut()
-                        .map(|s| s.last_states.insert(t.id.clone(), st.state.clone().unwrap()));
+                    runtime_state().lock().unwrap().as_mut().map(|s| {
+                        s.last_states
+                            .insert(t.id.clone(), st.state.clone().unwrap())
+                    });
                 }
                 statuses.insert(t.id.clone(), st);
             }
             /* match the Electron change-detection: only publish a new frame
-               when the payload differs. BTreeMap<RuntimeStatus> derives
-               PartialEq, so compare structs directly instead of serializing
-               the whole map to JSON on every tick. */
+            when the payload differs. BTreeMap<RuntimeStatus> derives
+            PartialEq, so compare structs directly instead of serializing
+            the whole map to JSON on every tick. */
             if statuses != last_statuses {
                 last_statuses = statuses.clone();
                 idle_ticks = 0;
@@ -592,14 +651,19 @@ pub fn init(app: tauri::AppHandle) {
             } else {
                 idle_ticks = idle_ticks.saturating_add(1);
             }
-            std::thread::sleep(std::time::Duration::from_millis(
-                if idle_ticks >= 5 { IDLE_TICK_MS } else { BASE_TICK_MS },
-            ));
+            std::thread::sleep(std::time::Duration::from_millis(if idle_ticks >= 5 {
+                IDLE_TICK_MS
+            } else {
+                BASE_TICK_MS
+            }));
         }
     });
 }
 
-pub fn agent_config_view(workspaces: &[crate::state::WorkspaceRec], agent_id: &str) -> Option<AgentConfigView> {
+pub fn agent_config_view(
+    workspaces: &[crate::state::WorkspaceRec],
+    agent_id: &str,
+) -> Option<AgentConfigView> {
     crate::agents::index::agent_config_view(workspaces, agent_id)
 }
 
@@ -686,31 +750,52 @@ mod tests {
     #[test]
     fn match_agent_resolves_npm_wrappers_via_cmd() {
         /* trailing /claude token (preceded by slash, end-of-line) matches the
-           token rule; an inline `claude-code` in the middle of the tail does not */
-        assert_eq!(match_agent("node", Some("/usr/local/bin/claude")), Some("claude"));
-        assert_eq!(match_agent("node", Some("node /usr/local/bin/claude --mcp")), Some("claude"));
-        assert_eq!(match_agent("npm", Some("npm exec @anthropic-ai/claude-code")), Some("claude"));
-        assert_eq!(match_agent("node", Some(".\\node_modules\\@openai\\codex")), Some("codex"));
-        assert_eq!(match_agent("node", Some("@google/gemini-cli foo")), Some("gemini"));
+        token rule; an inline `claude-code` in the middle of the tail does not */
+        assert_eq!(
+            match_agent("node", Some("/usr/local/bin/claude")),
+            Some("claude")
+        );
+        assert_eq!(
+            match_agent("node", Some("node /usr/local/bin/claude --mcp")),
+            Some("claude")
+        );
+        assert_eq!(
+            match_agent("npm", Some("npm exec @anthropic-ai/claude-code")),
+            Some("claude")
+        );
+        assert_eq!(
+            match_agent("node", Some(".\\node_modules\\@openai\\codex")),
+            Some("codex")
+        );
+        assert_eq!(
+            match_agent("node", Some("@google/gemini-cli foo")),
+            Some("gemini")
+        );
         assert_eq!(match_agent("node", Some(".pi/agent run")), Some("pi"));
     }
 
     /* measured: an npm shim on POSIX is a symlink to the package entry point,
-       but the kernel writes the *shim* path into argv[1], not the package path
-       (`node /usr/local/bin/codex --version`), so the file name of the
-       argument is what identifies the agent on macOS/Linux */
+    but the kernel writes the *shim* path into argv[1], not the package path
+    (`node /usr/local/bin/codex --version`), so the file name of the
+    argument is what identifies the agent on macOS/Linux */
     #[test]
     fn match_agent_reads_launcher_paths() {
         assert_eq!(
             match_agent("node", Some("node /usr/local/bin/codex --version")),
             Some("codex")
         );
-        assert_eq!(match_agent("node", Some("node /usr/local/bin/gemini")), Some("gemini"));
+        assert_eq!(
+            match_agent("node", Some("node /usr/local/bin/gemini")),
+            Some("gemini")
+        );
         assert_eq!(
             match_agent("node", Some("node /usr/local/bin/claude-code")),
             Some("claude")
         );
-        assert_eq!(match_agent("node", Some("node /usr/local/bin/kimi")), Some("kimi"));
+        assert_eq!(
+            match_agent("node", Some("node /usr/local/bin/kimi")),
+            Some("kimi")
+        );
         /* a python-based agent keeps the interpreter in argv[0] as well */
         assert_eq!(
             match_agent(
@@ -734,12 +819,15 @@ mod tests {
     }
 
     /* when the shim passes the package entry point to node itself the file name
-       is a generic cli.js/index.js, so the npm package directory is the only
-       agent evidence — the shape Windows npm shims and `npm exec` produce */
+    is a generic cli.js/index.js, so the npm package directory is the only
+    agent evidence — the shape Windows npm shims and `npm exec` produce */
     #[test]
     fn match_agent_reads_npm_package_dirs() {
         assert_eq!(
-            match_agent("node", Some("node /usr/local/lib/node_modules/@openai/codex/bin/codex.js")),
+            match_agent(
+                "node",
+                Some("node /usr/local/lib/node_modules/@openai/codex/bin/codex.js")
+            ),
             Some("codex")
         );
         assert_eq!(
@@ -783,7 +871,7 @@ mod tests {
     #[test]
     fn deepest_match_finds_agent_descendant_at_shallowest_depth() {
         /* shell → node → claude-code. The node wrapper itself matches via the
-           trailing /claude token, so the shallowest agent (depth 1) wins. */
+        trailing /claude token, so the shallowest agent (depth 1) wins. */
         let procs = vec![
             proc(1, 0, "zsh", None),
             proc(2, 1, "node", Some("node /usr/local/bin/claude")),
@@ -819,8 +907,8 @@ mod tests {
     }
 
     /* macOS: pi sets process.title, so sysinfo reports name="node" and the
-       real name lands in the argument list — the tab used to read as "shell"
-       unless a grandchild happened to carry ".pi/agent" in its argv */
+    real name lands in the argument list — the tab used to read as "shell"
+    unless a grandchild happened to carry ".pi/agent" in its argv */
     #[test]
     fn match_agent_reads_title_rewritten_pi() {
         assert_eq!(
@@ -829,22 +917,37 @@ mod tests {
         );
         assert_eq!(match_agent("node", Some("pi")), Some("pi"));
         /* the launcher path is recognized too; pi itself rewrites argv[0] */
-        assert_eq!(match_agent("node", Some("node /usr/local/bin/pi")), Some("pi"));
+        assert_eq!(
+            match_agent("node", Some("node /usr/local/bin/pi")),
+            Some("pi")
+        );
         /* unrelated node processes stay unmatched */
-        assert_eq!(match_agent("node", Some("node server.js --port 3000")), None);
-        assert_eq!(match_agent("node", Some("node /usr/lib/pipeline/index.js")), None);
+        assert_eq!(
+            match_agent("node", Some("node server.js --port 3000")),
+            None
+        );
+        assert_eq!(
+            match_agent("node", Some("node /usr/lib/pipeline/index.js")),
+            None
+        );
     }
 
     #[test]
     fn match_agent_recognizes_omp_and_pi_wrappers() {
         assert_eq!(match_agent("omp", None), Some("omp"));
-        assert_eq!(match_agent("node", Some("node ./oh-my-pi/bin/omp")), Some("omp"));
-        assert_eq!(match_agent("node", Some("node @mariozechner/pi-coding-agent")), Some("pi"));
+        assert_eq!(
+            match_agent("node", Some("node ./oh-my-pi/bin/omp")),
+            Some("omp")
+        );
+        assert_eq!(
+            match_agent("node", Some("node @mariozechner/pi-coding-agent")),
+            Some("pi")
+        );
     }
 
     /* Windows: `process.title` only renames the console (libuv calls
-       SetConsoleTitleW), so sysinfo reports the real image name "node.exe" and
-       the npm shim's backslash install path is the only agent evidence */
+    SetConsoleTitleW), so sysinfo reports the real image name "node.exe" and
+    the npm shim's backslash install path is the only agent evidence */
     #[test]
     fn match_agent_reads_windows_npm_shim_paths() {
         assert_eq!(
@@ -878,7 +981,7 @@ mod tests {
     }
 
     /* Linux: libuv's uv_set_process_title calls prctl(PR_SET_NAME), so
-       /proc/<pid>/stat comm — what sysinfo reads as the name — becomes "pi" */
+    /proc/<pid>/stat comm — what sysinfo reads as the name — becomes "pi" */
     #[test]
     fn match_agent_reads_linux_prctl_name() {
         assert_eq!(match_agent("pi", Some("pi --resume")), Some("pi"));
@@ -887,7 +990,7 @@ mod tests {
     #[test]
     fn deepest_match_respects_start_identity_miss() {
         /* the start process itself matches nothing even if it is a real agent;
-           we only look at descendants, mirroring the TS behavior */
+        we only look at descendants, mirroring the TS behavior */
         let procs = vec![proc(1, 0, "claude", None)];
         assert!(deepest_match(1, &parent_map(&procs)).is_none());
     }

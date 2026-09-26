@@ -3,25 +3,25 @@
 // (see MIGRATION_TO_TAURI.md). Phase 1 creates the skeleton; each
 // module gains its implementation in its dedicated phase.
 
-pub mod state;
-pub mod split_tree;
-pub mod shell;
-pub mod pty;
-pub mod pty_host;
-pub mod terminal;
-pub mod detect;
-pub mod agents;
 pub mod agent_hooks;
+pub mod agents;
 pub mod bridge;
 pub mod bridge_config;
 pub mod commands;
+pub mod detect;
 pub mod git;
 pub mod overlay;
 pub mod plugin;
+pub mod pty;
+pub mod pty_host;
 pub mod remote;
 pub mod runtime;
-use std::sync::Arc;
+pub mod shell;
+pub mod split_tree;
+pub mod state;
+pub mod terminal;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -38,8 +38,8 @@ pub fn run() {
     // start(), below, and commands that arrive meanwhile wait on its gate.
     let pty_manager = pty::PtyManager::new();
     /* safe mode is decided before the webview exists: if it engages, the
-       renderer must know from its very first paint so it can skip plugin
-       activation instead of racing the banner */
+    renderer must know from its very first paint so it can skip plugin
+    activation instead of racing the banner */
     let boot_report = plugin::boot::begin_boot(&app_state, plugin::boot::requested_on_cli());
     if boot_report.safe_mode {
         eprintln!(
@@ -58,7 +58,7 @@ pub fn run() {
             plugin::scheme::handle(ctx, req, responder);
         })
         /* must be the first plugin: a second launch has to bail out before it
-           touches the store or the pty host daemon */
+        touches the store or the pty host daemon */
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             use tauri::Manager;
             if let Some(win) = app.get_webview_window("main") {
@@ -73,28 +73,33 @@ pub fn run() {
         .manage(app_state)
         .manage(pty_manager);
     builder = builder.setup(move |app| {
-        eprintln!("[perf] backend-ready-ms={}", process_start.elapsed().as_millis());
+        eprintln!(
+            "[perf] backend-ready-ms={}",
+            process_start.elapsed().as_millis()
+        );
         use tauri::Emitter;
         use tauri::Manager;
         let handle = app.handle().clone();
         /* connect to (or spawn) the pty host daemon. Runs first because it is
-           the slowest step, and any IPC command that arrives meanwhile waits
-           on the manager's ready gate instead of failing. */
+        the slowest step, and any IPC command that arrives meanwhile waits
+        on the manager's ready gate instead of failing. */
         app.state::<pty::PtyManager>().start(handle.clone());
         commands::cleanup_clipboard_temp_files();
         git::init_watch(handle.clone());
         /* boot-time remote restore: mirrors Electron's index.ts startRemote()
-           call when prefs.remote.enabled was persisted true from a prior
-           session — otherwise the panel shows "On" but never actually starts. */
+        call when prefs.remote.enabled was persisted true from a prior
+        session — otherwise the panel shows "On" but never actually starts. */
         remote::restore_on_startup(&handle, app.state::<state::AppStateManager>().inner());
+        /* keeps a public tunnel up when cloudflared exits on its own */
+        remote::spawn_tunnel_watchdog(&handle);
         /* agent runtime detection: headless screen feed + process poller */
         runtime::init(handle.clone());
         /* approval bridge: unix socket the managed agent hooks write to */
         bridge::start_bridge(handle.clone(), &app.state::<pty::PtyManager>());
         /* bundled plugins: install or refresh the ones shipped with this
-           build. Runs in setup so the resource dir can be resolved, and
-           before the renderer's first plugin_list, so the registry is
-           complete when the UI asks for it. */
+        build. Runs in setup so the resource dir can be resolved, and
+        before the renderer's first plugin_list, so the registry is
+        complete when the UI asks for it. */
         {
             let paths = plugin::registry::PluginPaths::new(
                 &app.path()
@@ -122,10 +127,10 @@ pub fn run() {
             }
         }
         /* track the last-known maximize state on the main window so we only
-           emit `win:maximized` on the actual OS transition (mirrors
-           Electron's `win.on('maximize'/'unmaximize')` pattern in
-           src/main/window.ts). The AtomicBool is shared between the
-           setup-time window event handler and win_toggle_maximize. */
+        emit `win:maximized` on the actual OS transition (mirrors
+        Electron's `win.on('maximize'/'unmaximize')` pattern in
+        src/main/window.ts). The AtomicBool is shared between the
+        setup-time window event handler and win_toggle_maximize. */
         if let Some(main) = app.get_webview_window("main") {
             let last_max = Arc::new(AtomicBool::new(main.is_maximized().unwrap_or(false)));
             app.manage(WindowMaxState(last_max.clone()));
@@ -142,8 +147,8 @@ pub fn run() {
                 }
                 tauri::WindowEvent::CloseRequested { .. } => {
                     /* approval-overlay remains alive after main closes. Exit
-                       explicitly so Windows does not leave a headless app
-                       process holding the single-instance lock. */
+                    explicitly so Windows does not leave a headless app
+                    process holding the single-instance lock. */
                     app_for_event.exit(0);
                 }
                 _ => {}
@@ -232,18 +237,20 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|_app, event| {
             /* ensure pending hook connections are closed on exit so agent
-               PermissionRequests don't hang waiting for our directive
-               (port of Electron's before-quit → stopBridge in bridge.ts).
+            PermissionRequests don't hang waiting for our directive
+            (port of Electron's before-quit → stopBridge in bridge.ts).
 
-               The panes are deliberately NOT killed here: they belong to the
-               pty host daemon, so quitting leaves the agent CLIs running and
-               the next launch reattaches to them. */
+            The panes are deliberately NOT killed here: they belong to the
+            pty host daemon, so quitting leaves the agent CLIs running and
+            the next launch reattaches to them. */
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 bridge::stop_bridge();
                 crate::remote::stop_tunnel();
-                crate::remote::stop_remote();
+                {
+                    crate::remote::stop_remote();
+                }
                 /* flush the debounced state writer: the last ~400 ms of
-                   patches would otherwise never reach bentomux.json */
+                patches would otherwise never reach bentomux.json */
                 {
                     use tauri::Manager;
                     if let Some(mgr) = _app.try_state::<crate::state::AppStateManager>() {
@@ -255,6 +262,6 @@ pub fn run() {
 }
 
 /* shared maximize-state guard; `win_toggle_maximize` reads/swaps it after
-   the OS toggle and emits the event so the renderer's `onMaximized` cb
-   fires on programmatic toggles too (Electron parity). */
+the OS toggle and emits the event so the renderer's `onMaximized` cb
+fires on programmatic toggles too (Electron parity). */
 pub struct WindowMaxState(pub Arc<AtomicBool>);

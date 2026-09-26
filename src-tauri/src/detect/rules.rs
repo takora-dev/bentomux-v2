@@ -1,9 +1,9 @@
 /* ---------------- screen-manifest rule engine ----------------
-   Rust port of src/main/detect/rules.ts — compact port of herdr's
-   agent-detection idea: ordered rules with priorities are evaluated
-   against regions of the live terminal screen (bottom lines, prompt box,
-   OSC title/progress) and the first match decides the semantic state
-   (idle / working / blocked). */
+Rust port of src/main/detect/rules.ts — compact port of herdr's
+agent-detection idea: ordered rules with priorities are evaluated
+against regions of the live terminal screen (bottom lines, prompt box,
+OSC title/progress) and the first match decides the semantic state
+(idle / working / blocked). */
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -19,8 +19,8 @@ pub enum RunState {
 }
 
 /* slices of the current screen a rule can be matched against.
-   Consumed only by the rule engine (never serialized over IPC), so it is
-   authored directly in the manifest just like the TS object literal. */
+Consumed only by the rule engine (never serialized over IPC), so it is
+authored directly in the manifest just like the TS object literal. */
 #[derive(Clone, Debug, PartialEq)]
 pub enum RegionName {
     OscTitle,
@@ -48,20 +48,30 @@ fn region_text(region: &RegionName, screen: &ScreenInput) -> (String, Vec<String
     };
     match region {
         RegionName::OscTitle => (screen.osc_title.clone(), vec![screen.osc_title.clone()]),
-        RegionName::OscProgress => (screen.osc_progress.clone(), vec![screen.osc_progress.clone()]),
+        RegionName::OscProgress => (
+            screen.osc_progress.clone(),
+            vec![screen.osc_progress.clone()],
+        ),
         RegionName::WholeRecent => recent(40),
         RegionName::WholeRecentWithoutCurrentPromptMarker => {
             let mut lines = screen.lines.clone();
-            if let Some(i) = lines.iter().rposition(|l| l.trim_start().starts_with('❯') || l.trim_start().starts_with('>')) {
+            if let Some(i) = lines
+                .iter()
+                .rposition(|l| l.trim_start().starts_with('❯') || l.trim_start().starts_with('>'))
+            {
                 lines.truncate(i);
             }
             (lines.join("\n"), lines)
         }
         RegionName::AfterLastPromptMarker => {
-            let start = screen.lines.iter().rposition(|l| {
-                let t = l.trim_start();
-                t.starts_with('❯') || t.starts_with('>')
-            }).unwrap_or(0);
+            let start = screen
+                .lines
+                .iter()
+                .rposition(|l| {
+                    let t = l.trim_start();
+                    t.starts_with('❯') || t.starts_with('>')
+                })
+                .unwrap_or(0);
             let lines = screen.lines[start..].to_vec();
             (lines.join("\n"), lines)
         }
@@ -78,7 +88,10 @@ fn region_text(region: &RegionName, screen: &ScreenInput) -> (String, Vec<String
         RegionName::LastLineAbovePromptBox => {
             let idx = screen.lines.iter().rposition(|l| rule_line(l));
             match idx {
-                Some(i) if i > 0 => (screen.lines[i - 1].clone(), vec![screen.lines[i - 1].clone()]),
+                Some(i) if i > 0 => (
+                    screen.lines[i - 1].clone(),
+                    vec![screen.lines[i - 1].clone()],
+                ),
                 _ => empty,
             }
         }
@@ -96,8 +109,8 @@ pub struct Matcher {
     pub contains: Option<Vec<String>>,
     pub regex: Option<Vec<String>>,
     /* TOML manifests author this as `line_regex` (snake_case); the struct
-       renames to camelCase for JSON compat, so accept both spellings or
-       every TOML line_regex rule is silently dropped on deserialize */
+    renames to camelCase for JSON compat, so accept both spellings or
+    every TOML line_regex rule is silently dropped on deserialize */
     #[serde(alias = "line_regex")]
     pub line_regex: Option<Vec<String>>,
     pub any: Option<Vec<Matcher>>,
@@ -129,7 +142,7 @@ pub struct AgentManifest {
 }
 
 /* what the caller hands in; `lines` is non-empty screen text, oldest first,
-   bottom of the viewport last */
+bottom of the viewport last */
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ScreenInput {
     pub osc_title: String,
@@ -148,10 +161,12 @@ pub struct Detection {
 
 fn rule_line(line: &str) -> bool {
     let t = line.trim_start();
-    let count = t.chars().take_while(|c| *c == '─' || *c == '━' || *c == '═').count();
+    let count = t
+        .chars()
+        .take_while(|c| *c == '─' || *c == '━' || *c == '═')
+        .count();
     count >= 6 && t.chars().count() == count
 }
-
 
 fn matches_matcher(m: &Matcher, text: &str, lines: &[String]) -> bool {
     let contains = m.contains.as_deref().unwrap_or(&[]);
@@ -160,19 +175,25 @@ fn matches_matcher(m: &Matcher, text: &str, lines: &[String]) -> bool {
     let lower_text = text.to_lowercase();
     let lower_lines: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
 
-    if !contains.is_empty() && !contains.iter().all(|s| lower_text.contains(&s.to_lowercase())) {
+    if !contains.is_empty()
+        && !contains
+            .iter()
+            .all(|s| lower_text.contains(&s.to_lowercase()))
+    {
         return false;
     }
     /* regex runs multi-line over the whole region text; Rust regex has no
-       'm'-style global multi match on a single string, so we anchor each
-       pattern against the joined text via a line-by-line scan when the
-       pattern is line-anchored, else a plain search. TS used new RegExp(r,'m')
-       which matches anywhere including per-line start anchors. */
+    'm'-style global multi match on a single string, so we anchor each
+    pattern against the joined text via a line-by-line scan when the
+    pattern is line-anchored, else a plain search. TS used new RegExp(r,'m')
+    which matches anywhere including per-line start anchors. */
     if !regex.is_empty() && !regex.iter().any(|r| regex_multi_hit(r, &lower_text)) {
         return false;
     }
     if !line_regex.is_empty()
-        && !lower_lines.iter().any(|line| line_regex.iter().any(|r| regex_line_hit(r, line)))
+        && !lower_lines
+            .iter()
+            .any(|line| line_regex.iter().any(|r| regex_line_hit(r, line)))
     {
         return false;
     }
@@ -191,8 +212,11 @@ fn matches_matcher(m: &Matcher, text: &str, lines: &[String]) -> bool {
             return false;
         }
     }
-    if contains.is_empty() && regex.is_empty() && line_regex.is_empty()
-        && m.any.as_ref().map_or(true, |a| a.is_empty()) && m.all.as_ref().map_or(true, |a| a.is_empty())
+    if contains.is_empty()
+        && regex.is_empty()
+        && line_regex.is_empty()
+        && m.any.as_ref().map_or(true, |a| a.is_empty())
+        && m.all.as_ref().map_or(true, |a| a.is_empty())
     {
         return false;
     }
@@ -200,9 +224,9 @@ fn matches_matcher(m: &Matcher, text: &str, lines: &[String]) -> bool {
 }
 
 /* Compiled-regex cache. Manifests are re-evaluated on every runtime tick
-   (once a second, per tab), so compiling inside the matcher rebuilt the
-   same patterns continuously. Keyed on the pattern source; an invalid
-   pattern is cached as None so the `contains` fallback is taken too. */
+(once a second, per tab), so compiling inside the matcher rebuilt the
+same patterns continuously. Keyed on the pattern source; an invalid
+pattern is cached as None so the `contains` fallback is taken too. */
 fn compiled(r: &str) -> Option<regex::Regex> {
     static CACHE: OnceLock<Mutex<HashMap<String, Option<regex::Regex>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -216,9 +240,9 @@ fn compiled(r: &str) -> Option<regex::Regex> {
 }
 
 /* TS: new RegExp(r, 'm').test(text) — an unanchored search that also lets
-   ^ / $ match at any line boundary. We approximate: try `^`/`$` multi-line
-   semantics by matching against each line (oldest-first join already gives
-   us each physical line), falling back to a substring regex search. */
+^ / $ match at any line boundary. We approximate: try `^`/`$` multi-line
+semantics by matching against each line (oldest-first join already gives
+us each physical line), falling back to a substring regex search. */
 fn regex_multi_hit(r: &str, text: &str) -> bool {
     match compiled(r) {
         Some(re) => re.is_match(text),
@@ -251,7 +275,11 @@ pub fn evaluate(manifest: &AgentManifest, screen: &ScreenInput) -> Detection {
             continue;
         }
         if rule.skip_state_update {
-            return Detection { state: None, rule_id: Some(rule.id.clone()), skip_state_update: true };
+            return Detection {
+                state: None,
+                rule_id: Some(rule.id.clone()),
+                skip_state_update: true,
+            };
         }
         return Detection {
             state: Some(rule.state),
@@ -259,15 +287,32 @@ pub fn evaluate(manifest: &AgentManifest, screen: &ScreenInput) -> Detection {
             skip_state_update: false,
         };
     }
-    Detection { state: None, rule_id: None, skip_state_update: false }
+    Detection {
+        state: None,
+        rule_id: None,
+        skip_state_update: false,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn matcher_rule(id: &str, state: RunState, priority: i32, region: RegionName, m: Matcher) -> Rule {
-        Rule { id: id.to_string(), state, priority, region, skip_state_update: false, match_: m }
+    fn matcher_rule(
+        id: &str,
+        state: RunState,
+        priority: i32,
+        region: RegionName,
+        m: Matcher,
+    ) -> Rule {
+        Rule {
+            id: id.to_string(),
+            state,
+            priority,
+            region,
+            skip_state_update: false,
+            match_: m,
+        }
     }
 
     fn manifest() -> AgentManifest {
@@ -275,12 +320,36 @@ mod tests {
         AgentManifest {
             agent: "claude".to_string(),
             rules: vec![
-                matcher_rule("osc_title_working", RunState::Working, 1100, RegionName::OscTitle,
-                    Matcher { regex: Some(S("^[\u{2800}-\u{28FF}\u{25D0}-\u{25D3}] ")), ..Default::default() }),
-                matcher_rule("prompt_box_idle", RunState::Idle, 900, RegionName::PromptBoxBody,
-                    Matcher { line_regex: Some(S(r"^\s*❯")), ..Default::default() }),
-                matcher_rule("blocked_q", RunState::Blocked, 980, RegionName::WholeRecent,
-                    Matcher { contains: Some(S("do you want to proceed?")), ..Default::default() }),
+                matcher_rule(
+                    "osc_title_working",
+                    RunState::Working,
+                    1100,
+                    RegionName::OscTitle,
+                    Matcher {
+                        regex: Some(S("^[\u{2800}-\u{28FF}\u{25D0}-\u{25D3}] ")),
+                        ..Default::default()
+                    },
+                ),
+                matcher_rule(
+                    "prompt_box_idle",
+                    RunState::Idle,
+                    900,
+                    RegionName::PromptBoxBody,
+                    Matcher {
+                        line_regex: Some(S(r"^\s*❯")),
+                        ..Default::default()
+                    },
+                ),
+                matcher_rule(
+                    "blocked_q",
+                    RunState::Blocked,
+                    980,
+                    RegionName::WholeRecent,
+                    Matcher {
+                        contains: Some(S("do you want to proceed?")),
+                        ..Default::default()
+                    },
+                ),
             ],
         }
     }
@@ -288,11 +357,14 @@ mod tests {
     #[test]
     fn high_priority_working_wins() {
         let m = manifest();
-        let d = evaluate(&m, &ScreenInput {
-            osc_title: "\u{2800} running".to_string(),
-            osc_progress: String::new(),
-            lines: vec!["some output".to_string()],
-        });
+        let d = evaluate(
+            &m,
+            &ScreenInput {
+                osc_title: "\u{2800} running".to_string(),
+                osc_progress: String::new(),
+                lines: vec!["some output".to_string()],
+            },
+        );
         assert_eq!(d.state, Some(RunState::Working));
         assert_eq!(d.rule_id.as_deref(), Some("osc_title_working"));
     }
@@ -300,22 +372,32 @@ mod tests {
     #[test]
     fn blocked_beats_lower_idle() {
         let m = manifest();
-        let d = evaluate(&m, &ScreenInput {
-            osc_title: String::new(),
-            osc_progress: String::new(),
-            lines: vec!["12:".to_string(), "do you want to proceed?".to_string(), "❯ 1. yes".to_string()],
-        });
+        let d = evaluate(
+            &m,
+            &ScreenInput {
+                osc_title: String::new(),
+                osc_progress: String::new(),
+                lines: vec![
+                    "12:".to_string(),
+                    "do you want to proceed?".to_string(),
+                    "❯ 1. yes".to_string(),
+                ],
+            },
+        );
         assert_eq!(d.state, Some(RunState::Blocked));
     }
 
     #[test]
     fn no_match_returns_null() {
         let m = manifest();
-        let d = evaluate(&m, &ScreenInput {
-            osc_title: String::new(),
-            osc_progress: String::new(),
-            lines: vec!["plain output".to_string()],
-        });
+        let d = evaluate(
+            &m,
+            &ScreenInput {
+                osc_title: String::new(),
+                osc_progress: String::new(),
+                lines: vec!["plain output".to_string()],
+            },
+        );
         assert_eq!(d.state, None);
         assert_eq!(d.rule_id, None);
     }
@@ -323,29 +405,34 @@ mod tests {
     #[test]
     fn match_is_case_insensitive() {
         let m = manifest();
-        let d = evaluate(&m, &ScreenInput {
-            osc_title: String::new(),
-            osc_progress: String::new(),
-            lines: vec!["DO YOU WANT TO PROCEED?".to_string()],
-        });
+        let d = evaluate(
+            &m,
+            &ScreenInput {
+                osc_title: String::new(),
+                osc_progress: String::new(),
+                lines: vec!["DO YOU WANT TO PROCEED?".to_string()],
+            },
+        );
         assert_eq!(d.state, Some(RunState::Blocked));
     }
 
     /* TOML manifests spell this key `line_regex` (snake_case) while the
-       struct serializes as camelCase for JSON IPC — the alias must keep
-       both spellings live, or every TOML line_regex rule is silently
-       dropped on deserialize (19 of 21 manifests hit this) */
+    struct serializes as camelCase for JSON IPC — the alias must keep
+    both spellings live, or every TOML line_regex rule is silently
+    dropped on deserialize (19 of 21 manifests hit this) */
     #[test]
     fn matcher_accepts_snake_case_line_regex() {
-        let parsed: Matcher = toml::from_str(r#"line_regex = ['^\s*❯']"#).expect("snake_case must parse");
+        let parsed: Matcher =
+            toml::from_str(r#"line_regex = ['^\s*❯']"#).expect("snake_case must parse");
         assert_eq!(parsed.line_regex, Some(vec!["^\\s*❯".to_string()]));
-        let parsed: Matcher = toml::from_str(r#"lineRegex = ['^\s*❯']"#).expect("camelCase must parse");
+        let parsed: Matcher =
+            toml::from_str(r#"lineRegex = ['^\s*❯']"#).expect("camelCase must parse");
         assert_eq!(parsed.line_regex, Some(vec!["^\\s*❯".to_string()]));
     }
 
     /* the compiled-regex cache is on the 1 Hz tick path; a pattern that fails
-       to compile must still be cached (as None) and fall back to a substring
-       search on every subsequent call, not just the first */
+    to compile must still be cached (as None) and fall back to a substring
+    search on every subsequent call, not just the first */
     #[test]
     fn invalid_regex_caches_and_falls_back_to_contains() {
         let bad = r"^(unclosed[[:alpha:";

@@ -1,7 +1,7 @@
 /* ---------------- file/config helpers shared by agent adapters ----------------
-   Rust port of src/main/agents/util.ts + the plain-file bit of path-lookup.ts.
-   Handles JSON/ENV/TOML config editing, SKILL.md frontmatter, AGENTS.md
-   memory sections and the bentomux ownership marker. */
+Rust port of src/main/agents/util.ts + the plain-file bit of path-lookup.ts.
+Handles JSON/ENV/TOML config editing, SKILL.md frontmatter, AGENTS.md
+memory sections and the bentomux ownership marker. */
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -23,15 +23,23 @@ pub fn slugify(name: &str) -> String {
         }
     }
     let s = out.trim_end_matches('-');
-    if s.is_empty() { "item".to_string() } else { s.chars().take(48).collect() }
+    if s.is_empty() {
+        "item".to_string()
+    } else {
+        s.chars().take(48).collect()
+    }
 }
 
 pub fn unique_slug(base: &str, taken: &HashSet<String>) -> String {
-    if !taken.contains(base) { return base.to_string(); }
+    if !taken.contains(base) {
+        return base.to_string();
+    }
     let mut i = 2;
     loop {
         let cand = format!("{base}-{i}");
-        if !taken.contains(&cand) { return cand; }
+        if !taken.contains(&cand) {
+            return cand;
+        }
         i += 1;
     }
 }
@@ -72,12 +80,19 @@ pub fn parse_env_file(raw: &str) -> HashMap<String, String> {
         let body = t.strip_prefix("export ").unwrap_or(t).trim();
         let Some(eq) = body.find('=') else { continue };
         let key = body[..eq].trim();
-        if key.is_empty() || !key.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false) {
+        if key.is_empty()
+            || !key
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_alphabetic() || c == '_')
+                .unwrap_or(false)
+        {
             continue;
         }
         let mut v = body[eq + 1..].trim().to_string();
         if (v.starts_with('"') && v.ends_with('"') && v.len() >= 2)
-            || (v.starts_with('\'') && v.ends_with('\'') && v.len() >= 2) {
+            || (v.starts_with('\'') && v.ends_with('\'') && v.len() >= 2)
+        {
             v = v[1..v.len() - 1].to_string();
         }
         out.insert(key.to_string(), v);
@@ -86,19 +101,28 @@ pub fn parse_env_file(raw: &str) -> HashMap<String, String> {
 }
 
 /* upsert KEY=VALUE lines; a null value removes the key's line.
-   Other lines (comments, blanks, foreign keys) keep their order. */
+Other lines (comments, blanks, foreign keys) keep their order. */
 pub fn upsert_env_file(raw: &str, entries: &HashMap<String, Option<String>>) -> String {
     let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
     for (key, value) in entries {
         let pat = format!(r"^\s*(?:export\s+)?{}\s*=", regex::escape(key));
-        let at = lines.iter().position(|l| regex::Regex::new(&pat).map(|r| r.is_match(l)).unwrap_or(false));
+        let at = lines.iter().position(|l| {
+            regex::Regex::new(&pat)
+                .map(|r| r.is_match(l))
+                .unwrap_or(false)
+        });
         match value {
             None => {
-                if let Some(i) = at { lines.remove(i); }
+                if let Some(i) = at {
+                    lines.remove(i);
+                }
             }
             Some(v) => {
-                if let Some(i) = at { lines[i] = format!("{key}={v}"); }
-                else { lines.push(format!("{key}={v}")); }
+                if let Some(i) = at {
+                    lines[i] = format!("{key}={v}");
+                } else {
+                    lines.push(format!("{key}={v}"));
+                }
             }
         }
     }
@@ -110,11 +134,15 @@ fn collapse_blank(lines: Vec<String>) -> Vec<String> {
     let mut prev_blank = true;
     for l in lines {
         let blank = l.trim().is_empty();
-        if blank && prev_blank { continue; }
+        if blank && prev_blank {
+            continue;
+        }
         out.push(l);
         prev_blank = blank;
     }
-    while out.last().map(|l| l.trim().is_empty()).unwrap_or(false) { out.pop(); }
+    while out.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+        out.pop();
+    }
     out
 }
 
@@ -133,20 +161,22 @@ pub fn context_to_number(s: &str) -> Option<i64> {
 }
 
 /* ---------------- minimal TOML editing (codex config.toml) ----------------
-   Supports exactly what the adapters need: bare-key scalar entries at the
-   top level and inside one-level [table] sections. Comments and foreign
-   content are preserved verbatim. */
+Supports exactly what the adapters need: bare-key scalar entries at the
+top level and inside one-level [table] sections. Comments and foreign
+content are preserved verbatim. */
 
 pub type TomlValue = toml::Value;
 
 fn toml_line_key(line: &str) -> Option<String> {
     let re = regex::Regex::new(r"^([A-Za-z0-9_-]+)\s*=").unwrap();
-    re.captures(line.trim()).map(|c| c.get(1).unwrap().as_str().to_string())
+    re.captures(line.trim())
+        .map(|c| c.get(1).unwrap().as_str().to_string())
 }
 
 fn toml_header_name(line: &str) -> Option<String> {
     let re = regex::Regex::new(r"^\s*\[([^\]]+)\]").unwrap();
-    re.captures(line).map(|c| c.get(1).unwrap().as_str().trim().to_string())
+    re.captures(line)
+        .map(|c| c.get(1).unwrap().as_str().trim().to_string())
 }
 
 fn read_toml_entries(raw: &str, table: Option<&str>) -> HashMap<String, toml::Value> {
@@ -157,16 +187,24 @@ fn read_toml_entries(raw: &str, table: Option<&str>) -> HashMap<String, toml::Va
             current = Some(h);
             continue;
         }
-        let Some(key) = toml_line_key(line) else { continue };
+        let Some(key) = toml_line_key(line) else {
+            continue;
+        };
         let in_table = current.is_some();
         let want_table = table.is_some();
-        if in_table != want_table { continue; }
+        if in_table != want_table {
+            continue;
+        }
         if let Some(want) = table {
-            if current.as_deref() != Some(want) { continue; }
+            if current.as_deref() != Some(want) {
+                continue;
+            }
         }
         if let Some(eq) = line.find('=') {
             let t = line[eq + 1..].trim();
-            if let Ok(v) = t.parse::<toml::Value>() { out.insert(key, v); }
+            if let Ok(v) = t.parse::<toml::Value>() {
+                out.insert(key, v);
+            }
         }
     }
     out
@@ -187,7 +225,13 @@ fn toml_scalar(v: &toml::Value) -> String {
     }
 }
 
-fn replace_or_insert(lines: &mut Vec<String>, key: &str, value: &toml::Value, from: usize, to: usize) {
+fn replace_or_insert(
+    lines: &mut Vec<String>,
+    key: &str,
+    value: &toml::Value,
+    from: usize,
+    to: usize,
+) {
     for i in from..to {
         if toml_line_key(&lines[i]).as_deref() == Some(key) {
             lines[i] = format!("{key} = {}", toml_scalar(value));
@@ -207,28 +251,36 @@ fn drop_key(lines: &mut Vec<String>, key: &str, from: usize, to: usize) {
 }
 
 fn first_table(lines: &[String]) -> usize {
-    lines.iter().position(|l| toml_header_name(l).is_some()).unwrap_or(lines.len())
+    lines
+        .iter()
+        .position(|l| toml_header_name(l).is_some())
+        .unwrap_or(lines.len())
 }
 
 /* set one top-level scalar; None removes it. Insertion point is right
-   before the first [table] header (or EOF). */
+before the first [table] header (or EOF). */
 pub fn upsert_toml_top(raw: &str, key: &str, value: Option<toml::Value>) -> String {
     let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
     let end = first_table(&lines);
-    if let Some(v) = &value { replace_or_insert(&mut lines, key, v, 0, end); }
-    else { drop_key(&mut lines, key, 0, end); }
+    if let Some(v) = &value {
+        replace_or_insert(&mut lines, key, v, 0, end);
+    } else {
+        drop_key(&mut lines, key, 0, end);
+    }
     collapse_blank(lines).join("\n")
 }
 
 /* set entries inside one [table] section; a None drops the key.
-   A missing section is appended. */
+A missing section is appended. */
 pub fn upsert_toml_table(
     raw: &str,
     table: &str,
     entries: &HashMap<String, Option<toml::Value>>,
 ) -> String {
     let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
-    let start = lines.iter().position(|l| toml_header_name(l).as_deref() == Some(table));
+    let start = lines
+        .iter()
+        .position(|l| toml_header_name(l).as_deref() == Some(table));
     let start = match start {
         Some(i) => i,
         None => {
@@ -238,22 +290,36 @@ pub fn upsert_toml_table(
             }
             fresh.push(format!("[{table}]"));
             for (k, v) in entries {
-                if let Some(v) = v { fresh.push(format!("{k} = {}", toml_scalar(v))); }
+                if let Some(v) = v {
+                    fresh.push(format!("{k} = {}", toml_scalar(v)));
+                }
             }
             return collapse_blank(fresh).join("\n");
         }
     };
     let mut end = start + 1;
-    while end < lines.len() && toml_header_name(&lines[end]).is_none() { end += 1; }
+    while end < lines.len() && toml_header_name(&lines[end]).is_none() {
+        end += 1;
+    }
     for (key, value) in entries {
-        if let Some(v) = value { replace_or_insert(&mut lines, key, v, start + 1, end); }
-        else { drop_key(&mut lines, key, start + 1, end); }
+        if let Some(v) = value {
+            replace_or_insert(&mut lines, key, v, start + 1, end);
+        } else {
+            drop_key(&mut lines, key, start + 1, end);
+        }
     }
     collapse_blank(lines).join("\n")
 }
 
 pub fn mtime(p: &str) -> u64 {
-    fs::metadata(p).and_then(|m| m.modified()).map(|t| t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)).unwrap_or(0)
+    fs::metadata(p)
+        .and_then(|m| m.modified())
+        .map(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
 }
 
 pub fn rm_rf(p: &str) {
@@ -268,7 +334,10 @@ pub fn on_path(binary: &str) -> bool {
 
 pub fn frontmatter(name: &str, description: &str, body: &str) -> String {
     let desc = description.replace('\n', " ");
-    format!("---\nname: {name}\ndescription: {desc}\n---\n\n{}\n", body.trim())
+    format!(
+        "---\nname: {name}\ndescription: {desc}\n---\n\n{}\n",
+        body.trim()
+    )
 }
 
 pub fn parse_frontmatter(raw: &str) -> (std::collections::HashMap<String, String>, String) {
@@ -280,7 +349,10 @@ pub fn parse_frontmatter(raw: &str) -> (std::collections::HashMap<String, String
             let body = raw[body_start..].trim_start().to_string();
             for line in head.lines() {
                 if let Some(colon) = line.find(':') {
-                    attrs.insert(line[..colon].trim().to_string(), line[colon + 1..].trim().to_string());
+                    attrs.insert(
+                        line[..colon].trim().to_string(),
+                        line[colon + 1..].trim().to_string(),
+                    );
                 }
             }
             return (attrs, body);
@@ -307,15 +379,28 @@ pub fn strip_memory_marker(raw: &str) -> Option<(String, String, String)> {
     let normalized = normalize_memory_markers(raw);
     let re = regex::Regex::new(
         r"(?m)^<!--\s*bentomux:memory:([^\s>]+)\s*-->\s*(?:#\s*(.+?)\s*$)?\s*([\s\S]*)$",
-    ).unwrap();
+    )
+    .unwrap();
     let cap = re.captures(&normalized)?;
-    Some((cap.get(1)?.as_str().to_string(), cap.get(2).map(|m| m.as_str().trim().to_string()).unwrap_or_default(), cap.get(3).map(|m| m.as_str().trim().to_string()).unwrap_or_default()))
+    Some((
+        cap.get(1)?.as_str().to_string(),
+        cap.get(2)
+            .map(|m| m.as_str().trim().to_string())
+            .unwrap_or_default(),
+        cap.get(3)
+            .map(|m| m.as_str().trim().to_string())
+            .unwrap_or_default(),
+    ))
 }
 
 /* ---------------- pi-style AGENTS.md sections ---------------- */
 
-fn section_begin(id: &str) -> String { format!("<!-- bentomux:memory:{id}:begin -->") }
-fn section_end(id: &str) -> String { format!("<!-- bentomux:memory:{id}:end -->") }
+fn section_begin(id: &str) -> String {
+    format!("<!-- bentomux:memory:{id}:begin -->")
+}
+fn section_end(id: &str) -> String {
+    format!("<!-- bentomux:memory:{id}:end -->")
+}
 
 fn esc(s: &str) -> String {
     regex::escape(s)
@@ -323,10 +408,18 @@ fn esc(s: &str) -> String {
 
 pub fn upsert_section(raw_in: &str, id: &str, title: &str, content: &str) -> String {
     let raw = normalize_memory_markers(raw_in);
-    let block = format!("{}\n# {title}\n\n{}\n{}", section_begin(id), content.trim(), section_end(id));
+    let block = format!(
+        "{}\n# {title}\n\n{}\n{}",
+        section_begin(id),
+        content.trim(),
+        section_end(id)
+    );
     let re = regex::Regex::new(&format!(
-        "{}[\\s\\S]*?{}", esc(&section_begin(id)), esc(&section_end(id))
-    )).unwrap();
+        "{}[\\s\\S]*?{}",
+        esc(&section_begin(id)),
+        esc(&section_end(id))
+    ))
+    .unwrap();
     if re.is_match(&raw) {
         return re.replace(&raw, block.as_str()).to_string();
     }
@@ -337,39 +430,45 @@ pub fn upsert_section(raw_in: &str, id: &str, title: &str, content: &str) -> Str
 pub fn remove_section(raw_in: &str, id: &str) -> String {
     let raw = normalize_memory_markers(raw_in);
     let re = regex::Regex::new(&format!(
-        r"\n?\s*{}[\s\S]*?{}\s*", esc(&section_begin(id)), esc(&section_end(id))
-    )).unwrap();
-    collapse_blank(re.replace_all(&raw, "\n").lines().map(str::to_string).collect()).join("\n")
+        r"\n?\s*{}[\s\S]*?{}\s*",
+        esc(&section_begin(id)),
+        esc(&section_end(id))
+    ))
+    .unwrap();
+    collapse_blank(
+        re.replace_all(&raw, "\n")
+            .lines()
+            .map(str::to_string)
+            .collect(),
+    )
+    .join("\n")
 }
 
 #[allow(clippy::type_complexity)]
 pub fn parse_sections(raw_in: &str) -> Vec<(String, String, String)> {
     let raw = normalize_memory_markers(raw_in);
     /* Electron's regex used a `\1` backreference to require the section-END
-       marker to carry the same id as the BEGIN marker. Rust's `regex` crate
-       does not support backreferences (linear-time guarantee), so we scan
-       manually: find each BEGIN marker, grab its id, then take the first
-       END marker with that same id — equivalent to the non-greedy `.*?`
-       match in the TS original. */
-    let begin = regex::Regex::new(
-        r"<!--\s*bentomux:memory:([^\s:>]+):begin\s*-->",
-    ).unwrap();
+    marker to carry the same id as the BEGIN marker. Rust's `regex` crate
+    does not support backreferences (linear-time guarantee), so we scan
+    manually: find each BEGIN marker, grab its id, then take the first
+    END marker with that same id — equivalent to the non-greedy `.*?`
+    match in the TS original. */
+    let begin = regex::Regex::new(r"<!--\s*bentomux:memory:([^\s:>]+):begin\s*-->").unwrap();
     let mut out = Vec::new();
     let mut pos = 0usize;
     while let Some(m) = begin.captures(&raw[pos..]) {
         let mv = m.get(0).unwrap();
         let id = m.get(1).unwrap().as_str();
         let after_begin = pos + mv.end();
-        let end_pat = format!(
-            "<!--\\s*bentomux:memory:{}:end\\s*-->",
-            regex::escape(id)
-        );
+        let end_pat = format!("<!--\\s*bentomux:memory:{}:end\\s*-->", regex::escape(id));
         let Ok(end_re) = regex::Regex::new(&end_pat) else {
             /* unreachable: regex::escape is always valid */
             return out;
         };
         let rest = &raw[after_begin..];
-        let Some(end_m) = end_re.find(rest) else { break };
+        let Some(end_m) = end_re.find(rest) else {
+            break;
+        };
         let body = &rest[..end_m.start()];
         /* optional title: a leading `# heading` line, then the content */
         let trimmed = body.trim_start();
@@ -404,14 +503,24 @@ mod tests {
     fn parse_sections_extracts_multiple_with_matching_ids() {
         let sections = parse_sections(&sample());
         assert_eq!(sections.len(), 2);
-        assert_eq!(sections[0], ("alpha".to_string(), "Title A".to_string(), "content A".to_string()));
-        assert_eq!(sections[1], ("beta".to_string(), "".to_string(), "content B".to_string()));
+        assert_eq!(
+            sections[0],
+            (
+                "alpha".to_string(),
+                "Title A".to_string(),
+                "content A".to_string()
+            )
+        );
+        assert_eq!(
+            sections[1],
+            ("beta".to_string(), "".to_string(), "content B".to_string())
+        );
     }
 
     #[test]
     fn parse_sections_does_not_panic_on_backreference_style_regex() {
         /* regression guard: the Electron original used a `\1` backreference
-           which Rust's regex crate rejects; the scan must run cleanly. */
+        which Rust's regex crate rejects; the scan must run cleanly. */
         let sections = parse_sections(&sample());
         assert_eq!(sections.len(), 2);
     }
@@ -419,9 +528,10 @@ mod tests {
     #[test]
     fn parse_sections_mismatched_end_id_is_skipped() {
         /* begin carries `alpha`, but the next end marker carries `gamma`;
-           no matching end → nothing is emitted (non-greedy + backref
-           semantics would also reject a mismatched id). */
-        let raw = "<!-- bentomux:memory:alpha:begin -->\ncontent\n<!-- bentomux:memory:gamma:end -->";
+        no matching end → nothing is emitted (non-greedy + backref
+        semantics would also reject a mismatched id). */
+        let raw =
+            "<!-- bentomux:memory:alpha:begin -->\ncontent\n<!-- bentomux:memory:gamma:end -->";
         let sections = parse_sections(raw);
         assert!(sections.is_empty());
     }

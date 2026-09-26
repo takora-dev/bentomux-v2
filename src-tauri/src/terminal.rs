@@ -1,7 +1,7 @@
 /* ---------------- authoritative PTY terminal model ----------------
-   The persistent PTY host owns the only vt100 parser for a pane. The app
-   receives immutable snapshots for runtime detection and the remote mirror;
-   it must not parse the same byte stream a second time. */
+The persistent PTY host owns the only vt100 parser for a pane. The app
+receives immutable snapshots for runtime detection and the remote mirror;
+it must not parse the same byte stream a second time. */
 
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -50,7 +50,13 @@ impl TerminalModel {
     }
 
     pub fn process(&mut self, chunk: &[u8]) {
-        feed(&mut self.term, &mut self.title, &mut self.progress, &mut self.osc_carry, chunk);
+        feed(
+            &mut self.term,
+            &mut self.title,
+            &mut self.progress,
+            &mut self.osc_carry,
+            chunk,
+        );
         if has_visible_activity(chunk) {
             self.last_data_at = now_ms();
         }
@@ -71,9 +77,9 @@ impl TerminalModel {
         TerminalSnapshot {
             text: self.text(),
             /* html is the expensive half of a snapshot (per-cell style walk
-               over the whole grid). Consumers that need it (remote mirror)
-               ask explicitly via snapshot_html(); the 500 ms hot tick must
-               not pay for it on panes nobody watches. */
+            over the whole grid). Consumers that need it (remote mirror)
+            ask explicitly via snapshot_html(); the 500 ms hot tick must
+            not pay for it on panes nobody watches. */
             html: String::new(),
             title: self.title.clone(),
             progress: self.progress.clone(),
@@ -197,10 +203,8 @@ fn has_visible_activity(chunk: &[u8]) -> bool {
 }
 
 const ANSI16: [&str; 16] = [
-    "#000000", "#cd0000", "#00cd00", "#cdcd00",
-    "#0000ee", "#cd00cd", "#00cdcd", "#e5e5e5",
-    "#7f7f7f", "#ff0000", "#00ff00", "#ffff00",
-    "#5c5cff", "#ff00ff", "#00ffff", "#ffffff",
+    "#000000", "#cd0000", "#00cd00", "#cdcd00", "#0000ee", "#cd00cd", "#00cdcd", "#e5e5e5",
+    "#7f7f7f", "#ff0000", "#00ff00", "#ffff00", "#5c5cff", "#ff00ff", "#00ffff", "#ffffff",
 ];
 
 fn ansi_css(c: vt100::Color) -> String {
@@ -227,9 +231,15 @@ fn cell_style(cell: &vt100::Cell) -> String {
         out.push_str(&ansi_css(bg));
         out.push(';');
     }
-    if cell.bold() { out.push_str("font-weight:bold;"); }
-    if cell.italic() { out.push_str("font-style:italic;"); }
-    if cell.underline() { out.push_str("text-decoration:underline;"); }
+    if cell.bold() {
+        out.push_str("font-weight:bold;");
+    }
+    if cell.italic() {
+        out.push_str("font-style:italic;");
+    }
+    if cell.underline() {
+        out.push_str("text-decoration:underline;");
+    }
     out
 }
 
@@ -256,9 +266,10 @@ fn screen_dump_html(term: &Parser) -> String {
         let mut prev_style = String::new();
         let mut open = false;
         let mut col = 0u16;
-        let mut line_has_content = false;
         while col < cols {
-            let Some(cell) = screen.cell(r, col) else { break };
+            let Some(cell) = screen.cell(r, col) else {
+                break;
+            };
             if cell.is_wide_continuation() {
                 col += 1;
                 continue;
@@ -267,12 +278,16 @@ fn screen_dump_html(term: &Parser) -> String {
             if cell.has_contents()
                 || cell.fgcolor() != vt100::Color::Default
                 || cell.bgcolor() != vt100::Color::Default
-                || cell.bold() || cell.italic() || cell.underline() || cell.inverse()
+                || cell.bold()
+                || cell.italic()
+                || cell.underline()
+                || cell.inverse()
             {
-                line_has_content = true;
                 let style = cell_style(cell);
                 if style != prev_style {
-                    if open { line.push_str("</span>"); }
+                    if open {
+                        line.push_str("</span>");
+                    }
                     open = false;
                     if !style.is_empty() {
                         line.push_str("<span style=\"");
@@ -284,20 +299,31 @@ fn screen_dump_html(term: &Parser) -> String {
                 }
                 line.push_str(&escape_cell(&cell.contents()));
             } else {
-                if open { line.push_str("</span>"); open = false; }
+                if open {
+                    line.push_str("</span>");
+                    open = false;
+                }
                 prev_style.clear();
                 line.push(' ');
             }
             col += if takes_two { 2 } else { 1 };
         }
-        while line.ends_with(' ') { line.pop(); }
-        if open { line.push_str("</span>"); }
-        if !out.is_empty() { out.push('\n'); }
-        if line_has_content || !line.trim().is_empty() {
-            out.push_str(&line);
+        while line.ends_with(' ') {
+            line.pop();
         }
+        if open {
+            line.push_str("</span>");
+        }
+        /* every row of the grid, always. A dump that started at the first
+        non-blank row changed height from frame to frame, and a mirror whose
+        height breathes makes the phone re-place its scroll on every frame
+        — which WebKit paints as a two-pass glitch (WebKit #261692), so a
+        block of the screen showed up missing on Safari only. */
+        if r > 0 {
+            out.push('\n');
+        }
+        out.push_str(&line);
     }
-    while out.ends_with('\n') { out.pop(); }
     out
 }
 
@@ -319,7 +345,9 @@ mod tests {
     fn state_replay_contains_rendered_text() {
         let mut model = TerminalModel::default();
         model.process(b"hello");
-        assert!(String::from_utf8(model.state_formatted()).unwrap().contains("hello"));
+        assert!(String::from_utf8(model.state_formatted())
+            .unwrap()
+            .contains("hello"));
     }
 
     #[test]
@@ -334,7 +362,54 @@ mod tests {
         model.process("x".repeat(150).as_bytes());
         assert!(model.snapshot_html().html.contains(&"x".repeat(150)));
         /* the hot tick snapshot skips html: runtime detection reads text,
-           title, and progress only */
+        title, and progress only */
         assert!(model.snapshot().html.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod probe_row_preservation {
+    use super::*;
+
+    /* a mirror screen must be a screen: every row of the grid present, in
+    order, including the blank ones an agent just cleared. A dump that
+    drops or collapses rows is content loss, not a rendering quirk. */
+    #[test]
+    fn a_dump_keeps_every_row_of_the_grid() {
+        let mut m = TerminalModel::new(6, 20);
+        m.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+        let html = m.snapshot_html().html;
+        let rows: Vec<&str> = html.split('\n').collect();
+        assert_eq!(rows.len(), 6, "row count drifted: {rows:?}");
+        assert_eq!(rows[0], "one");
+        assert_eq!(rows[5], "six");
+    }
+
+    #[test]
+    fn a_cleared_middle_keeps_its_rows() {
+        let mut m = TerminalModel::new(6, 20);
+        m.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+        m.process(b"\x1b[3;1H\x1b[2K\x1b[4;1H\x1b[2K");
+        let html = m.snapshot_html().html;
+        let rows: Vec<&str> = html.split('\n').collect();
+        assert_eq!(rows.len(), 6, "a cleared row collapsed the dump: {rows:?}");
+        assert_eq!(rows[1], "two");
+        assert_eq!(rows[2], "");
+        assert_eq!(rows[3], "");
+        assert_eq!(rows[4], "five");
+    }
+
+    #[test]
+    fn leading_blank_rows_are_kept_so_the_height_is_stable() {
+        let mut m = TerminalModel::new(6, 20);
+        /* a TUI that homes the cursor and draws from the middle: the rows
+        above it stay blank, and the mirror must still be 6 rows tall or
+        the phone's scroll offset moves on every frame */
+        m.process(b"\x1b[4;1Hbottom line");
+        let html = m.snapshot_html().html;
+        let rows: Vec<&str> = html.split('\n').collect();
+        assert_eq!(rows.len(), 6, "leading blanks were dropped: {rows:?}");
+        assert_eq!(rows[3], "bottom line");
+        assert!(rows[..3].iter().all(|r| r.is_empty()));
     }
 }
