@@ -1,11 +1,11 @@
 /* ---------------- plugin platform: manifest model + shared constants ----------------
-   Spec: docs/PLUGIN_PLATFORM.md. Vocabulary: CONTEXT.md.
+Spec: docs/PLUGIN_PLATFORM.md. Vocabulary: CONTEXT.md.
 
-   A plugin is a folder holding `plugin.json` and an ES module entry. This
-   module owns the manifest types, the permission vocabulary, and the error
-   type every other plugin submodule reports through. Nothing here touches
-   Tauri or the filesystem beyond what a caller hands in, so the whole model
-   is unit-testable without a running app. */
+A plugin is a folder holding `plugin.json` and an ES module entry. This
+module owns the manifest types, the permission vocabulary, and the error
+type every other plugin submodule reports through. Nothing here touches
+Tauri or the filesystem beyond what a caller hands in, so the whole model
+is unit-testable without a running app. */
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -71,15 +71,7 @@ pub const BACKEND_ALLOWLIST: &[&str] = &[
 
 /// Contribution kinds, in the order the Studio review screen lists them.
 pub const CONTRIBUTION_KINDS: &[&str] = &[
-    "commands",
-    "topbar",
-    "sidebar",
-    "dock",
-    "tabs",
-    "modals",
-    "widgets",
-    "settings",
-    "services",
+    "commands", "topbar", "sidebar", "dock", "tabs", "modals", "widgets", "settings", "services",
 ];
 
 /* ---------------- errors ---------------- */
@@ -240,8 +232,12 @@ pub struct PluginRecord {
 pub enum PluginSource {
     /// Shipped inside the app under the reserved publisher.
     Bundled,
-    Folder { path: String },
-    Url { url: String },
+    Folder {
+        path: String,
+    },
+    Url {
+        url: String,
+    },
 }
 
 impl PluginRecord {
@@ -297,8 +293,8 @@ pub fn safe_join(root: &Path, rel: &str) -> Option<PathBuf> {
     let joined = root.join(candidate);
 
     /* the leaf exists: canonicalize it and require containment. This also
-       resolves a symlinked leaf to its real target, so a link pointing out
-       of the plugin folder is caught here. */
+    resolves a symlinked leaf to its real target, so a link pointing out
+    of the plugin folder is caught here. */
     if let Ok(real_joined) = joined.canonicalize() {
         return if real_joined.starts_with(&real_root) {
             Some(real_joined)
@@ -308,9 +304,9 @@ pub fn safe_join(root: &Path, rel: &str) -> Option<PathBuf> {
     }
 
     /* the leaf is absent. Walk up to the deepest ancestor that exists and
-       check *that* for containment — otherwise a symlinked directory inside
-       the plugin could point outside it while the leaf itself is missing,
-       which is exactly what a not-yet-created file looks like. */
+    check *that* for containment — otherwise a symlinked directory inside
+    the plugin could point outside it while the leaf itself is missing,
+    which is exactly what a not-yet-created file looks like. */
     let mut probe = joined.parent()?;
     loop {
         if let Ok(real_probe) = probe.canonicalize() {
@@ -332,7 +328,8 @@ pub fn valid_id(id: &str) -> bool {
     };
     let segment_ok = |s: &str| {
         !s.is_empty()
-            && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            && s.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
             && !s.starts_with('-')
             && !s.ends_with('-')
     };
@@ -375,7 +372,7 @@ mod tests {
     }
 
     /* "missing" and "forbidden" are different answers: a caller that cannot
-       tell them apart reports the wrong fix to an authoring agent */
+    tell them apart reports the wrong fix to an authoring agent */
     #[test]
     fn safe_join_distinguishes_missing_from_forbidden() {
         let dir = std::env::temp_dir().join(format!("bentomux-paths2-{}", std::process::id()));
@@ -383,17 +380,23 @@ mod tests {
         std::fs::create_dir_all(dir.join("assets")).unwrap();
 
         let missing = safe_join(&dir, "not-yet-written.js");
-        assert!(missing.is_some(), "an absent file inside the root is not an escape");
+        assert!(
+            missing.is_some(),
+            "an absent file inside the root is not an escape"
+        );
         assert!(!missing.unwrap().exists());
 
         let missing_nested = safe_join(&dir, "assets/deep/also-missing.js");
-        assert!(missing_nested.is_some(), "absent intermediate dirs are fine too");
+        assert!(
+            missing_nested.is_some(),
+            "absent intermediate dirs are fine too"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
     /* a symlinked directory must not become a way out of the plugin folder,
-       even when the leaf under it does not exist yet */
+    even when the leaf under it does not exist yet */
     #[cfg(unix)]
     #[test]
     fn safe_join_refuses_a_symlinked_directory_escape() {
@@ -407,7 +410,10 @@ mod tests {
 
         std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
 
-        assert!(safe_join(&root, "link/secret.txt").is_none(), "existing leaf reached through a link");
+        assert!(
+            safe_join(&root, "link/secret.txt").is_none(),
+            "existing leaf reached through a link"
+        );
         assert!(
             safe_join(&root, "link/absent.txt").is_none(),
             "an absent leaf under a symlinked dir is still an escape"
@@ -422,7 +428,10 @@ mod tests {
         let lists = c.lists();
         assert_eq!(lists.len(), CONTRIBUTION_KINDS.len());
         for (i, kind) in CONTRIBUTION_KINDS.iter().enumerate() {
-            assert_eq!(lists[i].0, *kind, "kind order must match the Studio review list");
+            assert_eq!(
+                lists[i].0, *kind,
+                "kind order must match the Studio review list"
+            );
         }
     }
 
@@ -455,7 +464,9 @@ mod tests {
             "apiVersion": 1, "entry": "index.js",
             "contributes": { "topbars": [] }
         });
-        assert!(serde_json::from_value::<PluginManifest>(raw).is_err(),
-            "a typo'd contribution key must fail loudly, not silently contribute nothing");
+        assert!(
+            serde_json::from_value::<PluginManifest>(raw).is_err(),
+            "a typo'd contribution key must fail loudly, not silently contribute nothing"
+        );
     }
 }

@@ -1,18 +1,18 @@
 /* ---------------- agent hook bridge ----------------
-   Rust port of src/main/bridge.ts. Agents configured with Bentomux's managed
-   hooks (agent_hooks.rs) run resources/bentomux-hook.cjs on PermissionRequest.
-   The CLI forwards the payload over a Unix socket or Windows named pipe, one
-   JSON line per connection. PermissionRequest connections stay open until the
-   user decides in the renderer; the directive JSON then goes back on the same
-   connection so the agent itself executes the decision — no keystroke
-   synthesis. Everything fails open: a dead bridge means the agent falls back
-   to its native prompt. */
+Rust port of src/main/bridge.ts. Agents configured with Bentomux's managed
+hooks (agent_hooks.rs) run resources/bentomux-hook.cjs on PermissionRequest.
+The CLI forwards the payload over a Unix socket or Windows named pipe, one
+JSON line per connection. PermissionRequest connections stay open until the
+user decides in the renderer; the directive JSON then goes back on the same
+connection so the agent itself executes the decision — no keystroke
+synthesis. Everything fails open: a dead bridge means the agent falls back
+to its native prompt. */
 
 use std::collections::HashMap;
-#[cfg(unix)]
-use std::io::{BufRead, BufReader, Write};
 #[cfg(all(test, unix))]
 use std::io::Read;
+#[cfg(unix)]
+use std::io::{BufRead, BufReader, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
@@ -21,8 +21,6 @@ use tauri::{path::BaseDirectory, Emitter, Manager};
 
 use crate::bridge_config::bridge_address;
 use crate::pty::PtyManager;
-
-
 
 /* the renderer-facing approval request (shared/types AgentApprovalRequest) */
 #[derive(Serialize, Clone, Debug)]
@@ -38,7 +36,7 @@ pub struct AgentApprovalRequest {
 }
 
 /* agent boundary events surface to the renderer (shared/types
-   AgentEventNotice — jump only today) */
+AgentEventNotice — jump only today) */
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentEventNotice {
@@ -73,7 +71,10 @@ fn bridge_state() -> &'static Mutex<BridgeState> {
         Mutex::new(BridgeState {
             app: None,
             pending: HashMap::new(),
-            hooks: HookReg { created: Vec::new(), closed: Vec::new() },
+            hooks: HookReg {
+                created: Vec::new(),
+                closed: Vec::new(),
+            },
             active_tab_anchor: None,
         })
     })
@@ -82,19 +83,23 @@ fn bridge_state() -> &'static Mutex<BridgeState> {
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 /* absolute path of the hook CLI agents execute — unpacked next to the
-   binary as a Tauri resource (packaged equivalent of process.resourcesPath) */
+binary as a Tauri resource (packaged equivalent of process.resourcesPath) */
 pub fn hook_script_path(app: &tauri::AppHandle) -> String {
     /* packaged: declared as `../resources/bentomux-hook.cjs`, so the bundler
-       stores it under `_up_/resources/` — resolve() applies that rewrite */
-    if let Ok(bundled) = app.path().resolve("../resources/bentomux-hook.cjs", BaseDirectory::Resource) {
+    stores it under `_up_/resources/` — resolve() applies that rewrite */
+    if let Ok(bundled) = app
+        .path()
+        .resolve("../resources/bentomux-hook.cjs", BaseDirectory::Resource)
+    {
         if bundled.is_file() {
             return bundled.to_string_lossy().into_owned();
         }
     }
     /* dev: resource_dir may not contain the bundled resources yet, so fall
-       back to the project's resources/ folder (electron's
-       app.getAppPath()/resources in dev) */
-    let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../resources/bentomux-hook.cjs");
+    back to the project's resources/ folder (electron's
+    app.getAppPath()/resources in dev) */
+    let dev =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../resources/bentomux-hook.cjs");
     if dev.is_file() {
         return dev.to_string_lossy().into_owned();
     }
@@ -104,32 +109,57 @@ pub fn hook_script_path(app: &tauri::AppHandle) -> String {
 /* ---------- subscribers (remote monitor) ---------- */
 
 pub fn on_approval_created(cb: impl Fn(&AgentApprovalRequest) + Send + Sync + 'static) {
-    bridge_state().lock().unwrap().hooks.created.push(Arc::new(cb));
+    bridge_state()
+        .lock()
+        .unwrap()
+        .hooks
+        .created
+        .push(Arc::new(cb));
 }
 
 pub fn on_approval_closed(cb: impl Fn(&str) + Send + Sync + 'static) {
-    bridge_state().lock().unwrap().hooks.closed.push(Arc::new(cb));
+    bridge_state()
+        .lock()
+        .unwrap()
+        .hooks
+        .closed
+        .push(Arc::new(cb));
 }
 
 /* currently-blocked requests, so a client that connects late (phone
-   opened after the agent got stuck) still sees the decision it must make */
+opened after the agent got stuck) still sees the decision it must make */
 pub fn pending_approvals() -> Vec<AgentApprovalRequest> {
-    bridge_state().lock().unwrap().pending.values().map(|p| p.req.clone()).collect()
+    bridge_state()
+        .lock()
+        .unwrap()
+        .pending
+        .values()
+        .map(|p| p.req.clone())
+        .collect()
 }
 /* Replay the request when a newly-created overlay missed the initial event
-   while its WebView was still loading. */
+while its WebView was still loading. */
 pub fn pending_approval() -> Option<AgentApprovalRequest> {
-    bridge_state().lock().unwrap().pending.values().next().map(|p| p.req.clone())
+    bridge_state()
+        .lock()
+        .unwrap()
+        .pending
+        .values()
+        .next()
+        .map(|p| p.req.clone())
 }
 
 /* ---------- helpers ---------- */
 
 fn str_field(v: &serde_json::Value, key: &str) -> Option<String> {
-    v.get(key).and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(str::to_string)
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /* one-line summary of what is being approved: bash commands raw, other
-   tools as compact JSON */
+tools as compact JSON */
 fn summarize(input: &serde_json::Value) -> String {
     if let Some(c) = input.get("command").and_then(|v| v.as_str()) {
         if !c.trim().is_empty() {
@@ -153,12 +183,14 @@ fn directive(decision: bool) -> String {
 }
 
 fn emit(event: &str, payload: &impl Serialize) {
-    let Some(app) = &bridge_state().lock().unwrap().app else { return };
+    let Some(app) = &bridge_state().lock().unwrap().app else {
+        return;
+    };
     let _ = app.emit(event, payload);
 }
 
 /* surface an agent boundary event to the renderer (used by the jump
-   command) — kept public for commands.rs */
+command) — kept public for commands.rs */
 pub fn emit_agent_event(notice: &AgentEventNotice) {
     emit("agent:event", notice);
 }
@@ -167,7 +199,9 @@ pub fn emit_agent_event(notice: &AgentEventNotice) {
 
 pub fn close_pending(request_id: &str) {
     let mut st = bridge_state().lock().unwrap();
-    let Some(pending) = st.pending.remove(request_id) else { return };
+    let Some(pending) = st.pending.remove(request_id) else {
+        return;
+    };
     let hooks = st.hooks.closed.clone();
     let _ = pending.response.send(None);
     drop(st);
@@ -193,7 +227,9 @@ pub fn drop_pane(pane_id: &str) {
 
 pub fn resolve_approval(request_id: &str, decision: bool) -> bool {
     let mut st = bridge_state().lock().unwrap();
-    let Some(pending) = st.pending.remove(request_id) else { return false };
+    let Some(pending) = st.pending.remove(request_id) else {
+        return false;
+    };
     let hooks = st.hooks.closed.clone();
     let _ = pending.response.send(Some(directive(decision) + "\n"));
     drop(st);
@@ -205,8 +241,8 @@ pub fn resolve_approval(request_id: &str, decision: bool) -> bool {
 }
 
 /* anchor pane of the tab the renderer currently shows; reported by the
-   renderer on every activation so the overlay can stay hidden while the
-   user is already looking at the requesting pane */
+renderer on every activation so the overlay can stay hidden while the
+user is already looking at the requesting pane */
 pub fn set_active_tab_anchor(tab_id: Option<String>) {
     bridge_state().lock().unwrap().active_tab_anchor = tab_id;
 }
@@ -222,10 +258,15 @@ fn tree_has_leaf_nodes(pane_id: &str) -> bool {
         _ => return false,
     };
     let tree_of = |rec: &crate::state::TabRec| -> crate::split_tree::PaneNode {
-        rec.split_tree.clone().unwrap_or_else(|| crate::split_tree::leaf_node(&rec.id))
+        rec.split_tree
+            .clone()
+            .unwrap_or_else(|| crate::split_tree::leaf_node(&rec.id))
     };
     /* find the tab that owns the anchor, then check the pane lands in it */
-    let rec = state.open_tabs.iter().find(|r| crate::split_tree::tree_has_leaf(&tree_of(r), &anchor));
+    let rec = state
+        .open_tabs
+        .iter()
+        .find(|r| crate::split_tree::tree_has_leaf(&tree_of(r), &anchor));
     match rec {
         Some(rec) => crate::split_tree::tree_has_leaf(&tree_of(rec), pane_id),
         None => false,
@@ -233,8 +274,8 @@ fn tree_has_leaf_nodes(pane_id: &str) -> bool {
 }
 
 /* approval notifications live ONLY in the floating overlay now. When the
-   main window is focused AND the requesting pane's tab is on screen the
-   user is already looking at it — show nothing at all. */
+main window is focused AND the requesting pane's tab is on screen the
+user is already looking at it — show nothing at all. */
 fn desktop_notify(req: &AgentApprovalRequest) {
     let st = bridge_state().lock().unwrap();
     let Some(app) = st.app.clone() else { return };
@@ -250,13 +291,19 @@ fn desktop_notify(req: &AgentApprovalRequest) {
         .map(|w| w.is_focused().unwrap_or(false) && !w.is_minimized().unwrap_or(false))
         .unwrap_or(false);
     drop(st);
-    if focused && req.pane_id.as_deref().map(tree_has_leaf_nodes).unwrap_or(false) {
+    if focused
+        && req
+            .pane_id
+            .as_deref()
+            .map(tree_has_leaf_nodes)
+            .unwrap_or(false)
+    {
         return;
     }
     /* the floating approval overlay is the user-facing notify surface
-       (port of Electron's src/main/overlay.ts showApprovalOverlay). Show
-       it; the overlay page subscribes to the `agent:approval` event that
-       the bridge already emitted for this request. */
+    (port of Electron's src/main/overlay.ts showApprovalOverlay). Show
+    it; the overlay page subscribes to the `agent:approval` event that
+    the bridge already emitted for this request. */
     crate::overlay::show_approval_overlay(&app);
 }
 
@@ -293,8 +340,15 @@ fn parse_envelope(raw: &str) -> Option<(String, Option<String>, serde_json::Valu
     if o.get("v").and_then(serde_json::Value::as_u64) != Some(1) {
         return None;
     }
-    let event = o.get("event").and_then(serde_json::Value::as_str)?.to_string();
-    let pane = o.get("pane").and_then(serde_json::Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+    let event = o
+        .get("event")
+        .and_then(serde_json::Value::as_str)?
+        .to_string();
+    let pane = o
+        .get("pane")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     let payload = o.get("payload")?.clone();
     if !payload.is_object() {
         return None;
@@ -306,11 +360,16 @@ fn dispatch(line: &str, response: mpsc::Sender<Option<String>>) -> bool {
     if let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) {
         if obj.get("method").and_then(|v| v.as_str()) == Some("pane.report_agent") {
             let params = obj.get("params").and_then(|v| v.as_object());
-            let pane = params.and_then(|p| p.get("pane_id")).and_then(|v| v.as_str());
+            let pane = params
+                .and_then(|p| p.get("pane_id"))
+                .and_then(|v| v.as_str());
             let agent = params.and_then(|p| p.get("agent")).and_then(|v| v.as_str());
             let state = params.and_then(|p| p.get("state")).and_then(|v| v.as_str());
             if let (Some(pane), Some(agent), Some(state)) = (pane, agent, state) {
-                let message = params.and_then(|p| p.get("message")).and_then(|v| v.as_str()).map(str::to_string);
+                let message = params
+                    .and_then(|p| p.get("message"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
                 crate::runtime::report_agent_state(pane, agent, state, message);
                 let _ = response.send(Some("{}\n".to_string()));
                 return true;
@@ -321,12 +380,20 @@ fn dispatch(line: &str, response: mpsc::Sender<Option<String>>) -> bool {
             return true;
         }
     }
-    let Some((event, pane, payload)) = parse_envelope(line) else { return false };
+    let Some((event, pane, payload)) = parse_envelope(line) else {
+        return false;
+    };
     if event != "PermissionRequest" {
         return false;
     }
-    let Some(tool_name) = str_field(&payload, "tool_name") else { return false };
-    let input = payload.get("tool_input").filter(|v| v.is_object()).cloned().unwrap_or(serde_json::json!({}));
+    let Some(tool_name) = str_field(&payload, "tool_name") else {
+        return false;
+    };
+    let input = payload
+        .get("tool_input")
+        .filter(|v| v.is_object())
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
     let req = AgentApprovalRequest {
         request_id: request_id(),
         pane_id: pane,
@@ -339,12 +406,20 @@ fn dispatch(line: &str, response: mpsc::Sender<Option<String>>) -> bool {
     let rid = req.request_id.clone();
     {
         let mut st = bridge_state().lock().unwrap();
-        st.pending.insert(rid, Pending { req: req.clone(), response });
+        st.pending.insert(
+            rid,
+            Pending {
+                req: req.clone(),
+                response,
+            },
+        );
         let created = st.hooks.created.clone();
         drop(st);
-        for cb in &created { cb(&req); }
+        for cb in &created {
+            cb(&req);
+        }
         /* Create/show the overlay before emitting the request. A newly-created
-           WebView cannot receive events emitted before its page subscribes. */
+        WebView cannot receive events emitted before its page subscribes. */
         desktop_notify(&req);
         emit("agent:approval", &req);
     }
@@ -356,9 +431,13 @@ fn handle_connection(mut stream: std::os::unix::net::UnixStream) {
     let Ok(read) = stream.try_clone() else { return };
     let mut reader = BufReader::new(read);
     let mut line = String::new();
-    if reader.read_line(&mut line).unwrap_or(0) == 0 { return; }
+    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+        return;
+    }
     let (response_tx, response_rx) = mpsc::channel();
-    if !dispatch(line.trim(), response_tx) { return; }
+    if !dispatch(line.trim(), response_tx) {
+        return;
+    }
     if let Ok(Some(response)) = response_rx.recv() {
         let _ = stream.write_all(response.as_bytes());
     }
@@ -370,16 +449,22 @@ async fn handle_connection(mut stream: tokio::net::windows::named_pipe::NamedPip
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     let mut reader = tokio::io::BufReader::new(stream);
     let mut line = String::new();
-    if reader.read_line(&mut line).await.unwrap_or(0) == 0 { return; }
+    if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+        return;
+    }
     stream = reader.into_inner();
     let (response_tx, response_rx) = mpsc::channel();
-    if !dispatch(line.trim(), response_tx) { return; }
-    let response = tokio::task::spawn_blocking(move || response_rx.recv()).await.ok().and_then(Result::ok);
+    if !dispatch(line.trim(), response_tx) {
+        return;
+    }
+    let response = tokio::task::spawn_blocking(move || response_rx.recv())
+        .await
+        .ok()
+        .and_then(Result::ok);
     if let Some(Some(response)) = response {
         let _ = stream.write_all(response.as_bytes()).await;
     }
 }
-
 
 /* ---------- listener lifecycle ---------- */
 
@@ -389,8 +474,8 @@ fn live_socket(addr: &str) -> bool {
 }
 
 /* The socket sits in a world-writable temp dir. 0600 means only this user can
-   connect: anything that can talk to it can inject approval requests and
-   answer the ones an agent is blocked on. */
+connect: anything that can talk to it can inject approval requests and
+answer the ones an agent is blocked on. */
 #[cfg(unix)]
 fn restrict_socket(addr: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -413,7 +498,6 @@ pub fn start_bridge(app: tauri::AppHandle, pty: &PtyManager) {
             }
             let _ = std::fs::remove_file(&addr); /* stale socket already gone */
         }
-
     }
     /* drop pending approvals when the requesting terminal pane exits */
     let mut exit_rx = pty.on_term_exit();
@@ -424,7 +508,9 @@ pub fn start_bridge(app: tauri::AppHandle, pty: &PtyManager) {
                 crate::runtime::clear_reported_agent(&pane_id);
                 drop_pane(&pane_id);
             }
-            Err(TryRecvError::Empty) | Err(TryRecvError::Lagged(_)) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            Err(TryRecvError::Empty) | Err(TryRecvError::Lagged(_)) => {
+                std::thread::sleep(std::time::Duration::from_millis(25))
+            }
             Err(TryRecvError::Closed) => break,
         }
     });
@@ -458,21 +544,29 @@ pub fn start_bridge(app: tauri::AppHandle, pty: &PtyManager) {
         use tokio::sync::broadcast::error::TryRecvError;
         match exit_rx.try_recv() {
             Ok((pane_id, _)) => drop_pane(&pane_id),
-            Err(TryRecvError::Empty) | Err(TryRecvError::Lagged(_)) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            Err(TryRecvError::Empty) | Err(TryRecvError::Lagged(_)) => {
+                std::thread::sleep(std::time::Duration::from_millis(25))
+            }
             Err(TryRecvError::Closed) => break,
         }
     });
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Runtime::new() {
             Ok(runtime) => runtime,
-            Err(error) => { eprintln!("[bentomux] bridge runtime failed: {error}"); return; }
+            Err(error) => {
+                eprintln!("[bentomux] bridge runtime failed: {error}");
+                return;
+            }
         };
         runtime.block_on(async move {
             use tokio::net::windows::named_pipe::ServerOptions;
             loop {
                 let server = match ServerOptions::new().create(&addr) {
                     Ok(server) => server,
-                    Err(error) => { eprintln!("[bentomux] bridge pipe bind failed on {addr}: {error}"); return; }
+                    Err(error) => {
+                        eprintln!("[bentomux] bridge pipe bind failed on {addr}: {error}");
+                        return;
+                    }
                 };
                 if let Err(error) = server.connect().await {
                     eprintln!("[bentomux] bridge pipe accept error: {error}");
@@ -534,10 +628,16 @@ mod tests {
 
     #[test]
     fn parse_envelope_requires_v1_object_payload() {
-        assert!(parse_envelope(r#"{"v":1,"event":"PermissionRequest","pane":"t1","payload":{}}"#).is_some());
+        assert!(
+            parse_envelope(r#"{"v":1,"event":"PermissionRequest","pane":"t1","payload":{}}"#)
+                .is_some()
+        );
         assert!(parse_envelope(r#"{"v":2,"event":"PermissionRequest","payload":{}}"#).is_none());
         assert!(parse_envelope(r#"not json"#).is_none());
-        assert!(parse_envelope(r#"{"v":1,"event":"PermissionRequest","pane":null,"payload":"str"}"#).is_none());
+        assert!(parse_envelope(
+            r#"{"v":1,"event":"PermissionRequest","pane":null,"payload":"str"}"#
+        )
+        .is_none());
     }
 
     #[test]
@@ -562,7 +662,10 @@ mod tests {
 
     #[test]
     fn str_field_filters_empty() {
-        assert_eq!(str_field(&serde_json::json!({"a":"x"}), "a").as_deref(), Some("x"));
+        assert_eq!(
+            str_field(&serde_json::json!({"a":"x"}), "a").as_deref(),
+            Some("x")
+        );
         assert_eq!(str_field(&serde_json::json!({"a":""}), "a"), None);
         assert_eq!(str_field(&serde_json::json!({"a":5}), "a"), None);
     }
@@ -612,9 +715,13 @@ mod tests {
         std::thread::spawn(|| handle_connection(server));
         client.write_all(br#"{"v":1,"event":"PermissionRequest","pane":"pane-1","payload":{"tool_name":"Bash","tool_input":{"command":"echo ok"}}}
 "#).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let request_id = loop {
-            if let Some(request) = pending_approvals().into_iter().next() { break request.request_id; }
+            if let Some(request) = pending_approvals().into_iter().next() {
+                break request.request_id;
+            }
             std::thread::sleep(Duration::from_millis(5));
         };
         assert!(resolve_approval(&request_id, false));
@@ -623,5 +730,4 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(response.trim()).unwrap();
         assert_eq!(json["hookSpecificOutput"]["decision"]["behavior"], "deny");
     }
-
 }

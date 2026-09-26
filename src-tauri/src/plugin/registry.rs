@@ -1,25 +1,27 @@
 /* ---------------- plugin platform: registry + install lifecycle ----------------
-   Spec: docs/PLUGIN_PLATFORM.md §3, §8.
+Spec: docs/PLUGIN_PLATFORM.md §3, §8.
 
-   The registry is the persisted record of what is installed; the code lives
-   beside it under `plugins/<id>/<version>/` and never inside bentomux.json.
-   Keeping the two apart is what makes rollback and "uninstall but keep my
-   data" possible without rewriting the store.
+The registry is the persisted record of what is installed; the code lives
+beside it under `plugins/<id>/<version>/` and never inside bentomux.json.
+Keeping the two apart is what makes rollback and "uninstall but keep my
+data" possible without rewriting the store.
 
-   Layout under the app data dir:
-     plugins/<id>/<version>/…     installed code, one dir per version
-     plugin-data/<id>.json        plugin-owned values, survive uninstall
+Layout under the app data dir:
+  plugins/<id>/<version>/…     installed code, one dir per version
+  plugin-data/<id>.json        plugin-owned values, survive uninstall
 
-   Every filesystem path a manifest supplies goes through safe_join, and every
-   version directory is written to a temp location first so a failed install
-   cannot leave a half-written plugin behind. */
+Every filesystem path a manifest supplies goes through safe_join, and every
+version directory is written to a temp location first so a failed install
+cannot leave a half-written plugin behind. */
 
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::validate::{self, ValidateOptions};
-use super::{PluginError, PluginManifest, PluginRecord, PluginResult, PluginSource, MAX_PLUGIN_BYTES};
+use super::{
+    PluginError, PluginManifest, PluginRecord, PluginResult, PluginSource, MAX_PLUGIN_BYTES,
+};
 
 /* ---------------- paths ---------------- */
 
@@ -148,9 +150,14 @@ pub fn install_from_folder(paths: &PluginPaths, source: &Path) -> PluginResult<P
 
     copy_tree(source, &staging)?;
 
-    finalize_install(paths, &manifest, staging, PluginSource::Folder {
-        path: source.to_string_lossy().to_string(),
-    })
+    finalize_install(
+        paths,
+        &manifest,
+        staging,
+        PluginSource::Folder {
+            path: source.to_string_lossy().to_string(),
+        },
+    )
 }
 
 /// Install from a zip archive already on disk (the CLI path, and what the
@@ -165,15 +172,20 @@ pub fn install_from_zip(paths: &PluginPaths, archive: &Path) -> PluginResult<Plu
         .map_err(|e| PluginError::Io(format!("extract failed: {}", e)))?;
 
     /* validate before moving anything into place: a bad archive must not
-       leave a version directory behind for the registry to trip over */
+    leave a version directory behind for the registry to trip over */
     let manifest = validate::validate_for_install(&staging_root, &ValidateOptions::default())?;
     let dest = stage_dir(paths, &manifest.id, &manifest.version)?;
     copy_tree(&staging_root, &dest)?;
     fs::remove_dir_all(&staging_root).ok();
 
-    finalize_install(paths, &manifest, dest, PluginSource::Folder {
-        path: archive.to_string_lossy().to_string(),
-    })
+    finalize_install(
+        paths,
+        &manifest,
+        dest,
+        PluginSource::Folder {
+            path: archive.to_string_lossy().to_string(),
+        },
+    )
 }
 
 /// Install a plugin that ships inside the app. Bundled plugins may use the
@@ -212,7 +224,9 @@ pub fn install_from_url(
         )));
     }
 
-    let tmp = paths.code_root.join(format!(".download-{}.zip", std::process::id()));
+    let tmp = paths
+        .code_root
+        .join(format!(".download-{}.zip", std::process::id()));
     if let Some(parent) = tmp.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -221,7 +235,9 @@ pub fn install_from_url(
     fs::remove_file(&tmp).ok();
 
     let mut record = result?;
-    record.source = PluginSource::Url { url: url.to_string() };
+    record.source = PluginSource::Url {
+        url: url.to_string(),
+    };
     Ok(record)
 }
 
@@ -297,14 +313,19 @@ pub fn uninstall(
 
 /// Record a successful update: the outgoing version becomes the rollback
 /// target, and only one previous version is kept on disk.
-pub fn commit_update(paths: &PluginPaths, record: &mut PluginRecord, new_version: &str, sha256: String) {
+pub fn commit_update(
+    paths: &PluginPaths,
+    record: &mut PluginRecord,
+    new_version: &str,
+    sha256: String,
+) {
     let old = record.version.clone();
     record.previous_version = Some(old.clone());
     record.version = new_version.to_string();
     record.sha256 = sha256;
 
     /* retention: drop every version directory that is neither current nor the
-       one rollback target */
+    one rollback target */
     let keep = [record.version.as_str(), old.as_str()];
     for version in paths.installed_versions(&record.id) {
         if !keep.contains(&version.as_str()) {
@@ -357,7 +378,7 @@ pub fn sync_bundled(paths: &PluginPaths, records: &mut Vec<PluginRecord>) -> Vec
         let Ok(manifest) = validate::validate_for_install(&dir, &ValidateOptions { bundled: true })
         else {
             /* a bundled plugin that fails validation is a packaging bug; the
-               app keeps running without it rather than refusing to boot */
+            app keeps running without it rather than refusing to boot */
             errors.push(PluginError::Validation(vec![format!(
                 "bundled plugin at {} failed validation",
                 dir.display()
@@ -376,10 +397,10 @@ pub fn sync_bundled(paths: &PluginPaths, records: &mut Vec<PluginRecord>) -> Vec
         match records.iter_mut().find(|r| r.id == manifest.id) {
             Some(existing) => {
                 /* Re-place when the content changed OR when the version
-                   directory is missing. The second case is what repairs an
-                   install left in a staging directory by an earlier build: the
-                   registry's hash still matches, so a hash-only check would
-                   skip it and the plugin would stay unreadable forever. */
+                directory is missing. The second case is what repairs an
+                install left in a staging directory by an earlier build: the
+                registry's hash still matches, so a hash-only check would
+                skip it and the plugin would stay unreadable forever. */
                 let placed = paths
                     .version_dir(&manifest.id, &manifest.version)
                     .join("plugin.json")
@@ -461,9 +482,11 @@ fn stage_dir(paths: &PluginPaths, id: &str, version: &str) -> PluginResult<PathB
 }
 
 fn temp_staging(paths: &PluginPaths) -> PluginResult<PathBuf> {
-    let dir = paths
-        .code_root
-        .join(format!(".unpack-{}-{}", std::process::id(), super::now_millis()));
+    let dir = paths.code_root.join(format!(
+        ".unpack-{}-{}",
+        std::process::id(),
+        super::now_millis()
+    ));
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }
@@ -481,7 +504,7 @@ fn finalize_install(
     }
     if dest.exists() {
         /* reinstalling the same version replaces it: the user asked for this
-           exact folder to be installed, so the on-disk copy is stale */
+        exact folder to be installed, so the on-disk copy is stale */
         fs::remove_dir_all(&dest)?;
     }
     fs::rename(&staging, &dest).map_err(|e| {
@@ -511,7 +534,7 @@ fn copy_tree(from: &Path, to: &Path) -> PluginResult<()> {
             fs::copy(&src, &dst)?;
         }
         /* symlinks are skipped: an installed plugin is a self-contained tree,
-           and the validator already flags links that leave the folder */
+        and the validator already flags links that leave the folder */
     }
     Ok(())
 }
@@ -558,7 +581,10 @@ mod tests {
         let rec = install_from_folder(&p, &src).unwrap();
         assert_eq!(rec.id, "acme.t");
         assert_eq!(rec.version, "1.0.0");
-        assert!(rec.enabled, "a plugin the user chose to install starts enabled");
+        assert!(
+            rec.enabled,
+            "a plugin the user chose to install starts enabled"
+        );
         assert_eq!(rec.sha256.len(), 64);
         assert!(p.version_dir("acme.t", "1.0.0").join("index.js").is_file());
 
@@ -586,10 +612,17 @@ mod tests {
         write_plugin(&src, "acme.t", "1.0.0");
         let first = install_from_folder(&p, &src).unwrap();
 
-        fs::write(src.join("index.js"), "export function activate() { return 2; }").unwrap();
+        fs::write(
+            src.join("index.js"),
+            "export function activate() { return 2; }",
+        )
+        .unwrap();
         let second = install_from_folder(&p, &src).unwrap();
 
-        assert_ne!(first.sha256, second.sha256, "content changed, digest must follow");
+        assert_ne!(
+            first.sha256, second.sha256,
+            "content changed, digest must follow"
+        );
         assert_eq!(p.installed_versions("acme.t"), vec!["1.0.0"]);
 
         fs::remove_dir_all(&root).ok();
@@ -604,7 +637,10 @@ mod tests {
 
         set_enabled(&mut records, "acme.t", false).unwrap();
         assert!(!records[0].enabled);
-        assert!(p.version_dir("acme.t", "1.0.0").is_dir(), "code stays on disk");
+        assert!(
+            p.version_dir("acme.t", "1.0.0").is_dir(),
+            "code stays on disk"
+        );
 
         set_enabled(&mut records, "acme.t", true).unwrap();
         assert!(records[0].enabled);
@@ -697,7 +733,7 @@ mod tests {
         assert!(matches!(insecure, Err(PluginError::Unsupported(_))));
 
         /* https but unreachable: the digest check never runs, and nothing is
-           written into the code root */
+        written into the code root */
         let unreachable = install_from_url(&p, "https://127.0.0.1:1/x.zip", "00");
         assert!(unreachable.is_err());
         assert_eq!(p.installed_versions("acme.t").len(), 0);
@@ -709,7 +745,11 @@ mod tests {
     fn bundled_sync_is_idempotent_and_uses_the_reserved_publisher() {
         let (p, root) = paths("bundled");
         let bundled = root.join("bundled");
-        write_plugin(&bundled.join("session-notes"), "bentomux.session-notes", "1.0.0");
+        write_plugin(
+            &bundled.join("session-notes"),
+            "bentomux.session-notes",
+            "1.0.0",
+        );
         let p = p.with_bundled(bundled.clone());
 
         let mut records = Vec::new();
@@ -727,7 +767,11 @@ mod tests {
         assert_eq!(records[0].sha256, first_sha);
 
         /* the app ships a new build of the bundled plugin */
-        write_plugin(&bundled.join("session-notes"), "bentomux.session-notes", "1.1.0");
+        write_plugin(
+            &bundled.join("session-notes"),
+            "bentomux.session-notes",
+            "1.1.0",
+        );
         let errors = sync_bundled(&p, &mut records);
         assert!(errors.is_empty(), "{:?}", errors);
         assert_eq!(records.len(), 1);
@@ -738,9 +782,9 @@ mod tests {
     }
 
     /* The bundled sync used to copy into a `.staging-*` directory and stop,
-       leaving the plugin somewhere `version_dir()` never looks. The failure
-       surfaced much later as an unreadable manifest and a module URL with no
-       file in it, so it is pinned here. */
+    leaving the plugin somewhere `version_dir()` never looks. The failure
+    surfaced much later as an unreadable manifest and a module URL with no
+    file in it, so it is pinned here. */
     #[test]
     fn bundled_sync_lands_in_the_version_directory_not_a_staging_dir() {
         let (p, root) = paths("bundled-place");
@@ -753,7 +797,10 @@ mod tests {
         assert!(errors.is_empty(), "{:?}", errors);
 
         let version_dir = p.version_dir("bentomux.notes", "1.0.0");
-        assert!(version_dir.is_dir(), "plugin must be at plugins/<id>/<version>/");
+        assert!(
+            version_dir.is_dir(),
+            "plugin must be at plugins/<id>/<version>/"
+        );
         assert!(version_dir.join("plugin.json").is_file());
         assert!(version_dir.join("index.js").is_file());
 
@@ -776,8 +823,8 @@ mod tests {
     }
 
     /* An install left in a staging directory by an older build has a registry
-       hash that still matches, so a hash-only check would never repair it.
-       The version directory's existence is part of the decision. */
+    hash that still matches, so a hash-only check would never repair it.
+    The version directory's existence is part of the decision. */
     #[test]
     fn bundled_sync_repairs_an_install_left_in_staging() {
         let (p, root) = paths("bundled-repair");
@@ -786,7 +833,7 @@ mod tests {
         let p = p.with_bundled(bundled.clone());
 
         /* simulate the broken state: a record whose hash matches, but whose
-           files sit in a staging directory */
+        files sit in a staging directory */
         let mut records = Vec::new();
         let digest = hash_tree(&bundled.join("notes")).unwrap();
         records.push(PluginRecord::new(
@@ -802,7 +849,9 @@ mod tests {
         let errors = sync_bundled(&p, &mut records);
         assert!(errors.is_empty(), "{:?}", errors);
         assert!(
-            p.version_dir("bentomux.notes", "1.0.0").join("plugin.json").is_file(),
+            p.version_dir("bentomux.notes", "1.0.0")
+                .join("plugin.json")
+                .is_file(),
             "the missing version directory must be repaired even though the hash matched"
         );
         assert_eq!(records.len(), 1);
@@ -830,7 +879,11 @@ mod tests {
         assert_eq!(h1, h2, "same tree, same digest");
 
         fs::write(dir.join("b.txt"), "three").unwrap();
-        assert_ne!(h1, hash_tree(&dir).unwrap(), "content change must move the digest");
+        assert_ne!(
+            h1,
+            hash_tree(&dir).unwrap(),
+            "content change must move the digest"
+        );
 
         fs::remove_dir_all(&dir).ok();
     }

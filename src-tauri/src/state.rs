@@ -1,8 +1,8 @@
 /* ---------------- persisted app state (app_data_dir/bentomux.json) ----------------
-   Rust port of src/main/store.ts. Owned by the backend; the renderer
-   reaches it only through Tauri commands. All structs serialize in the
-   exact camelCase JSON shape the Electron version wrote, so existing
-   bentomux.json files load unchanged. */
+Rust port of src/main/store.ts. Owned by the backend; the renderer
+reaches it only through Tauri commands. All structs serialize in the
+exact camelCase JSON shape the Electron version wrote, so existing
+bentomux.json files load unchanged. */
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -31,7 +31,7 @@ pub struct TabRec {
     pub id: String,
     pub workspace_id: String,
     /* split view layout; absent when the tab holds a single pane.
-       id is always the first (topmost-leftmost) leaf of the tree. */
+    id is always the first (topmost-leftmost) leaf of the tree. */
     #[serde(skip_serializing_if = "Option::is_none")]
     pub split_tree: Option<PaneNode>,
     /* custom tab title; absent/empty falls back to branch or workspace name */
@@ -65,7 +65,7 @@ pub struct RemotePrefs {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
     /* pairing token embedded in the QR URL; generated on first enable so
-       paired devices survive restarts */
+    paired devices survive restarts */
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
 }
@@ -86,10 +86,10 @@ pub struct Prefs {
     pub sidebar_width: Option<f64>,
     pub expanded: Option<HashMap<String, bool>>,
     /* last custom tab title per workspace; new tabs inherit it so closing
-       a tab never loses the name */
+    a tab never loses the name */
     pub tab_titles: Option<HashMap<String, String>>,
     /* folders picked through the add-workspace menu, newest first (capped at 8);
-       feeds the "Recent Folder" submenu */
+    feeds the "Recent Folder" submenu */
     pub recent_folders: Option<Vec<String>>,
     /* user-resized approval overlay window (px); absent = built-in default */
     pub approval_overlay: Option<OverlaySize>,
@@ -101,7 +101,7 @@ pub struct Prefs {
     /* auto-update; absent = enabled */
     pub auto_update: Option<bool>,
     /* consecutive boot attempts without a successful first paint. Drives the
-       automatic safe-mode entry (plugin::boot); 0 after any good boot. */
+    automatic safe-mode entry (plugin::boot); 0 after any good boot. */
     pub boot_attempts: Option<u32>,
 }
 
@@ -109,7 +109,7 @@ impl Default for Prefs {
     fn default() -> Self {
         Prefs {
             /* "system" so a fresh install follows the OS appearance; an
-               explicit light/dark pick is persisted and wins from then on */
+            explicit light/dark pick is persisted and wins from then on */
             theme: Some("system".to_string()),
             palette: Some("default".to_string()),
             font: None,
@@ -132,7 +132,7 @@ impl Default for Prefs {
 }
 
 /* toggle-off definitions with no native flag in the agent's own config
-   live here so toggling back on restores them exactly */
+live here so toggling back on restores them exactly */
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceSnapshot {
@@ -155,7 +155,11 @@ pub struct Capabilities {
 
 impl Default for Capabilities {
     fn default() -> Self {
-        Capabilities { memory: false, skills: false, mcp: false }
+        Capabilities {
+            memory: false,
+            skills: false,
+            mcp: false,
+        }
     }
 }
 
@@ -195,15 +199,15 @@ pub struct AppState {
     pub shadow: ShadowStore,
     pub prefs: Prefs,
     /* detected agent runtimes; populated on boot + on every agents:list
-       command so the sidebar/detail page can render without a separate fetch */
+    command so the sidebar/detail page can render without a separate fetch */
     pub agents: Vec<AgentInfo>,
     /* installed plugins. The registry only: plugin code lives under
-       app_data_dir/plugins/<id>/<version>/ and plugin data under
-       plugin-data/<id>.json, so this stays a small, diffable list. */
+    app_data_dir/plugins/<id>/<version>/ and plugin data under
+    plugin-data/<id>.json, so this stays a small, diffable list. */
     pub plugins: Vec<PluginRecord>,
     /* session-only, never persisted: this boot is running with third-party
-       plugins disabled. `serde(skip)` keeps it out of bentomux.json — safe
-       mode is a fact about this session, not a saved preference. */
+    plugins disabled. `serde(skip)` keeps it out of bentomux.json — safe
+    mode is a fact about this session, not a saved preference. */
     #[serde(skip)]
     pub safe_mode: bool,
     /* how many consecutive boot attempts led here, for the banner copy */
@@ -229,7 +233,7 @@ impl Default for AppState {
 }
 
 /* ---------------- tabs persisted before layout trees existed ----------------
-   carried flat extraIds; migrate into a split tree like normTab() did */
+carried flat extraIds; migrate into a split tree like normTab() did */
 
 fn norm_tab(o: &serde_json::Value) -> Option<TabRec> {
     let id = o.get("id").and_then(|v| v.as_str())?;
@@ -257,7 +261,11 @@ fn norm_tab(o: &serde_json::Value) -> Option<TabRec> {
         let extra_ids: Vec<String> = o
             .get("extraIds")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         if !extra_ids.is_empty() {
             let dir = match o.get("splitDir").and_then(|v| v.as_str()) {
@@ -285,8 +293,8 @@ pub struct AppStateManager {
 
 impl AppStateManager {
     /* Resolve the store path without a live AppHandle so state can be
-       managed on the Builder — before WebView2 initialises — eliminating
-       the race that causes the Windows "state not managed" boot error. */
+    managed on the Builder — before WebView2 initialises — eliminating
+    the race that causes the Windows "state not managed" boot error. */
     pub fn pre_build_path() -> PathBuf {
         #[cfg(target_os = "windows")]
         let base = std::env::var_os("APPDATA")
@@ -299,7 +307,9 @@ impl AppStateManager {
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let base = std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share"))
+            })
             .unwrap_or_else(|| PathBuf::from("."));
         // Must match the active Tauri identifier so dev and production stores stay separate.
         let identifier = if std::env::var_os("BENTOMUX_USER_DATA_SUFFIX").is_some() {
@@ -324,7 +334,7 @@ impl AppStateManager {
         let mut state = AppState::default();
         if !load_from(&mut state, &path) {
             /* first run after the rebrand: adopt the pre-rebrand store so the
-               user's workspaces/tabs/prefs survive the rename */
+            user's workspaces/tabs/prefs survive the rename */
             if let Some(parent) = path.parent() {
                 let legacy = parent
                     .parent()
@@ -341,7 +351,10 @@ impl AppStateManager {
         if state.prefs.palette.as_deref() == Some("pixel") {
             state.prefs.palette = Some("classic".to_string());
         }
-        let mgr = AppStateManager { state: Mutex::new(state), path };
+        let mgr = AppStateManager {
+            state: Mutex::new(state),
+            path,
+        };
         let st = mgr.state.lock().unwrap().clone();
         persist(&mgr.path, &st);
         mgr
@@ -352,9 +365,9 @@ impl AppStateManager {
     }
 
     /* every mutation goes through here so each change is persisted.
-       Writes are debounced: rapid patch bursts (drag, typing prefs, tab
-       churn) coalesce into one disk write instead of one tmp+backup+rename
-       cycle per call. */
+    Writes are debounced: rapid patch bursts (drag, typing prefs, tab
+    churn) coalesce into one disk write instead of one tmp+backup+rename
+    cycle per call. */
     pub fn patch_state<F>(&self, updater: F) -> AppState
     where
         F: FnOnce(&mut AppState),
@@ -368,7 +381,7 @@ impl AppStateManager {
     }
 
     /* synchronous write-through for paths where losing the write is worse
-       than the disk cost: boot counter, tests, shutdown */
+    than the disk cost: boot counter, tests, shutdown */
     pub fn patch_state_sync<F>(&self, updater: F) -> AppState
     where
         F: FnOnce(&mut AppState),
@@ -438,8 +451,8 @@ impl AppStateManager {
 }
 
 /* parse + adopt one store file; false when missing/unreadable.
-   Same-version AND older files are adopted forward-only: keep the user's
-   workspaces/tabs/prefs/shadow and add new fields with their defaults. */
+Same-version AND older files are adopted forward-only: keep the user's
+workspaces/tabs/prefs/shadow and add new fields with their defaults. */
 fn load_from(state: &mut AppState, path: &Path) -> bool {
     let Ok(content) = fs::read_to_string(path) else {
         return false;
@@ -459,7 +472,7 @@ fn load_from(state: &mut AppState, path: &Path) -> bool {
 }
 
 /* spread raw over the defaults field-by-field (the {...state, ...raw}
-   semantics of the TypeScript version), with legacy tabs normalized */
+semantics of the TypeScript version), with legacy tabs normalized */
 fn adopt(state: &mut AppState, raw: &serde_json::Value) {
     let mut patched: AppState =
         serde_json::from_value(raw.clone()).unwrap_or_else(|_| AppState::default());
@@ -470,18 +483,18 @@ fn adopt(state: &mut AppState, raw: &serde_json::Value) {
         patched.shadow = HashMap::new();
     }
     /* Stamp the CURRENT version, not the file's.
-       Adopting the old number meant every save wrote the old number back, so a
-       v3 store stayed "v3" forever and each boot re-ran the same adoption path.
-       The value is a migration marker: once this build has read the file, the
-       file is in this build's shape. */
+    Adopting the old number meant every save wrote the old number back, so a
+    v3 store stayed "v3" forever and each boot re-ran the same adoption path.
+    The value is a migration marker: once this build has read the file, the
+    file is in this build's shape. */
     patched.version = VERSION;
     *state = patched;
 }
 
 /* debounced persist: first patch in a burst writes through after
-   PERSIST_DEBOUNCE_MS; further patches inside the window only refresh the
-   pending snapshot, so N rapid patches cost 1 disk write. Backup rotation
-   is hourly, not per-write. */
+PERSIST_DEBOUNCE_MS; further patches inside the window only refresh the
+pending snapshot, so N rapid patches cost 1 disk write. Backup rotation
+is hourly, not per-write. */
 const PERSIST_DEBOUNCE_MS: u64 = 400;
 const BACKUP_INTERVAL: Duration = Duration::from_secs(3600);
 
@@ -505,7 +518,11 @@ fn schedule_persist(path: PathBuf, state: AppState) {
     let due = {
         let mut guard = pending().lock().unwrap();
         let first = guard.is_none();
-        *guard = Some(PendingPersist { path: path.clone(), state, at: Instant::now() });
+        *guard = Some(PendingPersist {
+            path: path.clone(),
+            state,
+            at: Instant::now(),
+        });
         first
     };
     if !due {
@@ -544,14 +561,13 @@ fn persist(path: &Path, state: &AppState) {
             fs::create_dir_all(dir).map_err(|e| format!("mkdir failed: {}", e))?;
         }
         /* compact JSON: pretty-printing costs bytes + time on every one of
-           the 44 patch_state call sites, and nothing reads this file by hand */
-        let json = serde_json::to_string(state)
-            .map_err(|e| format!("serialize failed: {}", e))?;
+        the 44 patch_state call sites, and nothing reads this file by hand */
+        let json = serde_json::to_string(state).map_err(|e| format!("serialize failed: {}", e))?;
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, json).map_err(|e| format!("write failed: {}", e))?;
         if path.exists() {
             /* hourly backup rotation instead of a rename on every write:
-               same crash safety, far fewer directory ops under patch bursts */
+            same crash safety, far fewer directory ops under patch bursts */
             let mut last = last_backup_at().lock().unwrap();
             let due = last.map(|t| t.elapsed() >= BACKUP_INTERVAL).unwrap_or(true);
             if due {
@@ -574,11 +590,8 @@ mod tests {
     use crate::split_tree::leaf_node;
 
     fn temp_path(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "bentomux-test-{}-{}",
-            tag,
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("bentomux-test-{}-{}", tag, std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         dir.join("bentomux.json")
     }
@@ -771,8 +784,8 @@ mod tests {
     }
 
     /* A store written by an older build must come back stamped with the
-       current version, or every save writes the old number back and the
-       migration path re-runs forever. */
+    current version, or every save writes the old number back and the
+    migration path re-runs forever. */
     #[test]
     fn test_adopting_an_old_store_stamps_the_current_version() {
         let path = temp_path("version-stamp");
@@ -821,7 +834,10 @@ mod tests {
         let mgr = AppStateManager::new(path.clone());
         let st = mgr.get_state();
         assert_eq!(st.workspaces.len(), 1, "user data survives the bump");
-        assert!(st.plugins.is_empty(), "the registry arrives empty, not missing");
+        assert!(
+            st.plugins.is_empty(),
+            "the registry arrives empty, not missing"
+        );
         cleanup(&path);
     }
 

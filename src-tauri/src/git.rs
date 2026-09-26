@@ -1,19 +1,19 @@
 /* ---------------- git branch per workspace + CLI operations ----------------
-   Rust port of src/main/git.rs (branch watch) + src/main/git-ops.ts
-   (status/diff/push/remoteInfo). Reads .git/HEAD directly for the branch
-   and polls the git dir; shells out to git (never node-pty) for the ops.
-   Handles .git as a file (worktrees / submodules).
+Rust port of src/main/git.rs (branch watch) + src/main/git-ops.ts
+(status/diff/push/remoteInfo). Reads .git/HEAD directly for the branch
+and polls the git dir; shells out to git (never node-pty) for the ops.
+Handles .git as a file (worktrees / submodules).
 
-   `history()` is the one addition with no Electron counterpart — the commit
-   graph is new UI, not a port (see docs/adr/0002-parity-rule-amended.md). */
+`history()` is the one addition with no Electron counterpart — the commit
+graph is new UI, not a port (see docs/adr/0002-parity-rule-amended.md). */
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Mutex;
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
 use std::time::Duration;
 use tauri::Emitter;
 
@@ -64,9 +64,9 @@ pub fn read_branch(ws_path: &str) -> Option<String> {
 }
 
 /* ---------------- branch watcher (fs.watch on .git/HEAD + 4s poll) ----------------
-   The Electron version pairs an fs.watch on the git dir with a 4s poll.
-   We mirror that with a notify::recommended_watcher on the git dir (fires on
-   HEAD changes, 60ms debounce) plus a per-workspace poll as the safety net. */
+The Electron version pairs an fs.watch on the git dir with a 4s poll.
+We mirror that with a notify::recommended_watcher on the git dir (fires on
+HEAD changes, 60ms debounce) plus a per-workspace poll as the safety net. */
 
 type BranchCb = Box<dyn Fn(&str, Option<&str>) + Send + Sync>;
 
@@ -86,13 +86,21 @@ fn watch_state() -> &'static Mutex<Option<WatchState>> {
 pub fn init_watch(handle: tauri::AppHandle) {
     let mut guard = watch_state().lock().unwrap();
     if guard.is_none() {
-        *guard = Some(WatchState { watchers: HashMap::new(), notify: None, handle: Some(handle) });
+        *guard = Some(WatchState {
+            watchers: HashMap::new(),
+            notify: None,
+            handle: Some(handle),
+        });
     }
 }
 
 pub fn on_branch_change(cb: impl Fn(&str, Option<&str>) + Send + Sync + 'static) {
     let mut guard = watch_state().lock().unwrap();
-    let st = guard.get_or_insert_with(|| WatchState { watchers: HashMap::new(), notify: None, handle: None });
+    let st = guard.get_or_insert_with(|| WatchState {
+        watchers: HashMap::new(),
+        notify: None,
+        handle: None,
+    });
     st.notify = Some(Box::new(cb));
 }
 
@@ -117,12 +125,15 @@ fn registered(workspace_id: &str) -> bool {
 }
 
 /* read the branch, compare to the stored last value, and emit the event when
-   it changed. true when the workspace is still registered (not unwatched). */
+it changed. true when the workspace is still registered (not unwatched). */
 fn check_and_emit(workspace_id: &str, ws_path: &str) -> bool {
     let cur = read_branch(ws_path);
     let should_emit = {
         let mut guard = watch_state().lock().unwrap();
-        match guard.as_mut().and_then(|s| s.watchers.get_mut(workspace_id)) {
+        match guard
+            .as_mut()
+            .and_then(|s| s.watchers.get_mut(workspace_id))
+        {
             Some(prev) => {
                 if *prev != cur {
                     *prev = cur.clone();
@@ -144,14 +155,19 @@ pub fn watch_workspace(workspace_id: &str, ws_path: &str) {
     unwatch_workspace(workspace_id);
     {
         let mut guard = watch_state().lock().unwrap();
-        let st = guard.get_or_insert_with(|| WatchState { watchers: HashMap::new(), notify: None, handle: None });
-        st.watchers.insert(workspace_id.to_string(), read_branch(ws_path));
+        let st = guard.get_or_insert_with(|| WatchState {
+            watchers: HashMap::new(),
+            notify: None,
+            handle: None,
+        });
+        st.watchers
+            .insert(workspace_id.to_string(), read_branch(ws_path));
     }
     let ws_path = ws_path.to_string();
     let wid = workspace_id.to_string();
 
     /* instant trigger: fs-watch the git dir, ignore transient files, then
-       quietly re-check the branch (git.ts's `setTimeout(check,60)`). */
+    quietly re-check the branch (git.ts's `setTimeout(check,60)`). */
     if let Some(dir) = git_dir_for(&ws_path) {
         let dir = dir.clone();
         let wid2 = wid.clone();
@@ -163,7 +179,10 @@ pub fn watch_workspace(workspace_id: &str, ws_path: &str) {
                 let _ = tx.send(res);
             };
             if let Ok(mut watcher) = RecommendedWatcher::new(on_event, notify::Config::default()) {
-                if watcher.watch(Path::new(&dir), RecursiveMode::NonRecursive).is_ok() {
+                if watcher
+                    .watch(Path::new(&dir), RecursiveMode::NonRecursive)
+                    .is_ok()
+                {
                     for res in rx {
                         if let Ok(ev) = res {
                             match ev.kind {
@@ -331,7 +350,9 @@ fn run_process(cwd: &str, args: &[&str], timeout_ms: Option<u64>) -> Result<RunO
     /* suppress the brief console window flash on Windows */
     #[cfg(target_os = "windows")]
     cmd.creation_flags(0x0800_0000 /* CREATE_NO_WINDOW */);
-    let mut child = cmd.spawn().map_err(|e| format!("git spawn failed: {}", e))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("git spawn failed: {}", e))?;
 
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
     /* stdout/stderr configured as piped above, so take() always yields a stream */
@@ -354,7 +375,11 @@ fn run_process(cwd: &str, args: &[&str], timeout_ms: Option<u64>) -> Result<RunO
             Ok(None) => {
                 if started.elapsed() >= timeout {
                     let _ = child.kill();
-                    return Err(format!("git {} timed out after {}ms", args.join(" "), timeout.as_millis()));
+                    return Err(format!(
+                        "git {} timed out after {}ms",
+                        args.join(" "),
+                        timeout.as_millis()
+                    ));
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
@@ -385,10 +410,10 @@ fn drain_capped(reader: impl std::io::Read) -> String {
 }
 
 /* Every git call here is a process spawn, and on macOS a spawn costs ~90ms
-   whatever it runs (`git --version` measures the same as `git log -n200`). The
-   work git does is a rounding error next to that, so the thing worth minimising
-   is the *number* of spawns, and any two calls that do not depend on each other
-   run on their own thread. `scope` lets them borrow ws_path/oid directly. */
+whatever it runs (`git --version` measures the same as `git log -n200`). The
+work git does is a rounding error next to that, so the thing worth minimising
+is the *number* of spawns, and any two calls that do not depend on each other
+run on their own thread. `scope` lets them borrow ws_path/oid directly. */
 
 fn ensure_ok(r: &RunOutput, what: &str) -> Result<(), String> {
     if r.code == 0 {
@@ -483,16 +508,38 @@ pub fn status(ws_path: &str) -> GitStatusResult {
     if git_dir_for(ws_path).is_none() {
         return GitStatusResult::default();
     }
-    let Ok(r) = run_process(ws_path, &["status", "--porcelain=v1", "-z", "-uall", "--branch"], None) else {
-        return GitStatusResult { is_repo: true, ..Default::default() };
+    let Ok(r) = run_process(
+        ws_path,
+        &["status", "--porcelain=v1", "-z", "-uall", "--branch"],
+        None,
+    ) else {
+        return GitStatusResult {
+            is_repo: true,
+            ..Default::default()
+        };
     };
     if let Err(e) = ensure_ok(&r, "git status") {
         eprintln!("[bentomux] git status: {}", e);
-        return GitStatusResult { is_repo: true, ..Default::default() };
+        return GitStatusResult {
+            is_repo: true,
+            ..Default::default()
+        };
     }
-    let parts: Vec<String> = r.stdout.split('\0').map(String::from).filter(|s| !s.is_empty()).collect();
+    let parts: Vec<String> = r
+        .stdout
+        .split('\0')
+        .map(String::from)
+        .filter(|s| !s.is_empty())
+        .collect();
     let (branch, ahead, behind, entries, has_untracked) = parse_status(&parts);
-    GitStatusResult { is_repo: true, branch, ahead, behind, entries, has_untracked }
+    GitStatusResult {
+        is_repo: true,
+        branch,
+        ahead,
+        behind,
+        entries,
+        has_untracked,
+    }
 }
 
 /* ---------------- diff ---------------- */
@@ -511,27 +558,40 @@ pub fn diff(ws_path: &str, path: Option<&str>) -> GitDiffResult {
         args.push(path);
     }
     let Ok(r) = run_process(ws_path, &args, None) else {
-        return GitDiffResult { is_repo: true, ..Default::default() };
+        return GitDiffResult {
+            is_repo: true,
+            ..Default::default()
+        };
     };
     if let Err(e) = ensure_ok(&r, "git diff") {
         eprintln!("[bentomux] git diff: {}", e);
-        return GitDiffResult { is_repo: true, ..Default::default() };
+        return GitDiffResult {
+            is_repo: true,
+            ..Default::default()
+        };
     }
     let files = parse_diff_blocks(&r.stdout);
-    GitDiffResult { is_repo: true, files }
+    GitDiffResult {
+        is_repo: true,
+        files,
+    }
 }
 
 fn parse_diff_blocks(stdout: &str) -> Vec<GitFileDiff> {
     diff_blocks(stdout)
         .map(|block| {
             let (path, status) = block_path_status(block);
-            GitFileDiff { path, status, patch: format!("diff --git {}", block) }
+            GitFileDiff {
+                path,
+                status,
+                patch: format!("diff --git {}", block),
+            }
         })
         .collect()
 }
 
 /* the per-file blocks of a `git diff` / `git show` patch. Every caller splits
-   the same way, so the split lives here rather than being repeated. */
+the same way, so the split lives here rather than being repeated. */
 fn diff_blocks(stdout: &str) -> impl Iterator<Item = &str> {
     stdout.split("diff --git ").filter(|b| !b.is_empty())
 }
@@ -558,11 +618,11 @@ fn block_path_status(block: &str) -> (String, String) {
 }
 
 /* +N/-N for one file's block, counted from the patch itself so the commit
-   detail view needs one git call instead of a second --numstat pass.
+detail view needs one git call instead of a second --numstat pass.
 
-   Counting starts at the first `@@`: before it, `---`/`+++` are file headers,
-   but inside a hunk a line reading `+++foo` is genuinely an added line and
-   must count. Binary files have no hunk and correctly report 0/0. */
+Counting starts at the first `@@`: before it, `---`/`+++` are file headers,
+but inside a hunk a line reading `+++foo` is genuinely an added line and
+must count. Binary files have no hunk and correctly report 0/0. */
 fn count_patch_lines(block: &str) -> (u64, u64) {
     let mut adds = 0u64;
     let mut dels = 0u64;
@@ -591,11 +651,17 @@ pub fn diff_stat(ws_path: &str) -> GitDiffStatResult {
         return GitDiffStatResult::default();
     }
     let Ok(r) = run_process(ws_path, &["diff", "--numstat"], None) else {
-        return GitDiffStatResult { is_repo: true, ..Default::default() };
+        return GitDiffStatResult {
+            is_repo: true,
+            ..Default::default()
+        };
     };
     if let Err(e) = ensure_ok(&r, "git diff --numstat") {
         eprintln!("[bentomux] git diff --numstat: {}", e);
-        return GitDiffStatResult { is_repo: true, ..Default::default() };
+        return GitDiffStatResult {
+            is_repo: true,
+            ..Default::default()
+        };
     }
     let mut additions = 0u64;
     let mut deletions = 0u64;
@@ -613,13 +679,21 @@ pub fn diff_stat(ws_path: &str) -> GitDiffStatResult {
         additions += a.parse::<u64>().unwrap_or(0);
         deletions += d.parse::<u64>().unwrap_or(0);
     }
-    GitDiffStatResult { is_repo: true, additions, deletions }
+    GitDiffStatResult {
+        is_repo: true,
+        additions,
+        deletions,
+    }
 }
 
 /* ---------------- push ---------------- */
 
 fn has_upstream(ws_path: &str) -> bool {
-    match run_process(ws_path, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], None) {
+    match run_process(
+        ws_path,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        None,
+    ) {
         Ok(r) => r.code == 0 && !r.stdout.trim().is_empty(),
         Err(_) => false,
     }
@@ -627,7 +701,11 @@ fn has_upstream(ws_path: &str) -> bool {
 
 pub fn push(ws_path: &str, set_upstream: bool) -> GitCommandResult {
     if git_dir_for(ws_path).is_none() {
-        return GitCommandResult { ok: false, stderr: "Not a git repository".into(), ..Default::default() };
+        return GitCommandResult {
+            ok: false,
+            stderr: "Not a git repository".into(),
+            ..Default::default()
+        };
     }
     let mut args: Vec<String> = vec!["push".to_string()];
     if set_upstream && !has_upstream(ws_path) {
@@ -639,7 +717,12 @@ pub fn push(ws_path: &str, set_upstream: bool) -> GitCommandResult {
     }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let r = run_process(ws_path, &arg_refs, Some(120_000)).unwrap_or_default();
-    GitCommandResult { ok: r.code == 0, stdout: r.stdout, stderr: r.stderr, code: r.code }
+    GitCommandResult {
+        ok: r.code == 0,
+        stdout: r.stdout,
+        stderr: r.stderr,
+        code: r.code,
+    }
 }
 
 /* ---------------- remote info ---------------- */
@@ -649,33 +732,56 @@ pub fn remote_info(ws_path: &str) -> GitRemoteInfo {
         return GitRemoteInfo::default();
     }
     let Ok(r) = run_process(ws_path, &["remote"], None) else {
-        return GitRemoteInfo { is_repo: true, ..Default::default() };
+        return GitRemoteInfo {
+            is_repo: true,
+            ..Default::default()
+        };
     };
     if let Err(e) = ensure_ok(&r, "git remote") {
         eprintln!("[bentomux] git remote: {}", e);
-        return GitRemoteInfo { is_repo: true, ..Default::default() };
+        return GitRemoteInfo {
+            is_repo: true,
+            ..Default::default()
+        };
     }
-    let remote = r.stdout.lines().map(|s| s.trim()).find(|s| !s.is_empty()).map(String::from);
+    let remote = r
+        .stdout
+        .lines()
+        .map(|s| s.trim())
+        .find(|s| !s.is_empty())
+        .map(String::from);
     let Some(remote) = remote else {
-        return GitRemoteInfo { is_repo: true, remote: None, default_branch: None };
+        return GitRemoteInfo {
+            is_repo: true,
+            remote: None,
+            default_branch: None,
+        };
     };
     let default_branch = {
         let head_arg = format!("refs/remotes/{}/HEAD", remote);
         let arg_refs: Vec<&str> = vec!["--short", &head_arg];
-        run_process(ws_path, &arg_refs, None)
-            .ok()
-            .and_then(|h| if h.code == 0 { h.stdout.trim().split('/').last().map(String::from) } else { None })
+        run_process(ws_path, &arg_refs, None).ok().and_then(|h| {
+            if h.code == 0 {
+                h.stdout.trim().split('/').last().map(String::from)
+            } else {
+                None
+            }
+        })
     };
-    GitRemoteInfo { is_repo: true, remote: Some(remote), default_branch }
+    GitRemoteInfo {
+        is_repo: true,
+        remote: Some(remote),
+        default_branch,
+    }
 }
 
 /* ---------------- history (commit graph) ---------------- */
 
 /* the graph renders `-n` commits at a time; a repo with a longer history just
-   shows the newest window rather than paging */
+shows the newest window rather than paging */
 const HISTORY_LIMIT: usize = 200;
 /* record/field separators for `git log --pretty=format:` — control characters
-   cannot appear in a subject or author name, so they are unambiguous */
+cannot appear in a subject or author name, so they are unambiguous */
 const FIELD_SEP: char = '\u{1f}';
 const RECORD_SEP: char = '\u{1e}';
 
@@ -692,8 +798,8 @@ fn ref_kind_and_name(full: &str) -> Option<(&'static str, &str)> {
 }
 
 /* `%(objectname)\x1f%(*objectname)\x1f%(HEAD)\x1f%(refname)` → (commit oid, ref).
-   An annotated tag's ref points at the tag object, so `%(*objectname)` (the
-   dereferenced commit) wins when it is present. */
+An annotated tag's ref points at the tag object, so `%(*objectname)` (the
+dereferenced commit) wins when it is present. */
 fn parse_ref_line(line: &str) -> Option<(String, GitRef)> {
     let mut it = line.split(FIELD_SEP);
     let obj = it.next()?.trim();
@@ -703,13 +809,17 @@ fn parse_ref_line(line: &str) -> Option<(String, GitRef)> {
     let oid = if deref.is_empty() { obj } else { deref };
     let (kind, name) = ref_kind_and_name(full)?;
     /* refs/remotes/<remote>/HEAD is a symbolic ref to the remote's default
-       branch — it duplicates that branch's label, so it is dropped */
+    branch — it duplicates that branch's label, so it is dropped */
     if name.ends_with("/HEAD") {
         return None;
     }
     Some((
         oid.to_string(),
-        GitRef { name: name.to_string(), kind: kind.to_string(), head },
+        GitRef {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            head,
+        },
     ))
 }
 
@@ -731,7 +841,13 @@ fn collect_refs(ws_path: &str) -> HashMap<String, Vec<GitRef>> {
     );
     let Ok(fr) = run_process(
         ws_path,
-        &["for-each-ref", ref_fmt.as_str(), "refs/heads", "refs/remotes", "refs/tags"],
+        &[
+            "for-each-ref",
+            ref_fmt.as_str(),
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ],
         None,
     ) else {
         return refs;
@@ -747,8 +863,8 @@ fn collect_refs(ws_path: &str) -> HashMap<String, Vec<GitRef>> {
 }
 
 /* `--date-order` is load-bearing, not cosmetic: it guarantees no parent is
-   listed before all of its children, which is the invariant the renderer's
-   lane assignment relies on. */
+listed before all of its children, which is the invariant the renderer's
+lane assignment relies on. */
 pub fn history(ws_path: &str) -> GitHistoryResult {
     if git_dir_for(ws_path).is_none() {
         return GitHistoryResult::default();
@@ -759,9 +875,16 @@ pub fn history(ws_path: &str) -> GitHistoryResult {
         rec = RECORD_SEP
     );
     let limit = format!("-n{}", HISTORY_LIMIT);
-    let args = ["log", "--all", "--date-order", limit.as_str(), pretty.as_str(), "--no-color"];
+    let args = [
+        "log",
+        "--all",
+        "--date-order",
+        limit.as_str(),
+        pretty.as_str(),
+        "--no-color",
+    ];
     /* the log and the refs are independent, so they spawn side by side: serially
-       they cost ~180ms of pure process startup for a panel open */
+    they cost ~180ms of pure process startup for a panel open */
     let (log, refs) = std::thread::scope(|s| {
         let l = s.spawn(|| run_process(ws_path, &args, None));
         let r = s.spawn(|| collect_refs(ws_path));
@@ -772,16 +895,25 @@ pub fn history(ws_path: &str) -> GitHistoryResult {
         )
     });
     let Some(r) = log else {
-        return GitHistoryResult { is_repo: true, ..Default::default() };
+        return GitHistoryResult {
+            is_repo: true,
+            ..Default::default()
+        };
     };
     /* a repo with no commits yet exits non-zero with an empty stdout; that is
-       an empty graph, not a failure */
+    an empty graph, not a failure */
     if r.code != 0 && r.stdout.trim().is_empty() {
-        return GitHistoryResult { is_repo: true, commits: Vec::new() };
+        return GitHistoryResult {
+            is_repo: true,
+            commits: Vec::new(),
+        };
     }
     if let Err(e) = ensure_ok(&r, "git log") {
         eprintln!("[bentomux] git log: {}", e);
-        return GitHistoryResult { is_repo: true, commits: Vec::new() };
+        return GitHistoryResult {
+            is_repo: true,
+            commits: Vec::new(),
+        };
     }
 
     let mut refs = refs;
@@ -789,7 +921,7 @@ pub fn history(ws_path: &str) -> GitHistoryResult {
     let mut commits = Vec::new();
     for record in r.stdout.split(RECORD_SEP) {
         /* git separates records with a newline, which lands at the head of
-           every record after the first */
+        every record after the first */
         let record = record.trim_start_matches('\n');
         if record.is_empty() {
             continue;
@@ -799,7 +931,12 @@ pub fn history(ws_path: &str) -> GitHistoryResult {
         if oid.is_empty() {
             continue;
         }
-        let parents: Vec<String> = it.next().unwrap_or("").split_whitespace().map(String::from).collect();
+        let parents: Vec<String> = it
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .map(String::from)
+            .collect();
         let author = it.next().unwrap_or("").to_string();
         let timestamp: i64 = it.next().unwrap_or("0").trim().parse().unwrap_or(0);
         let subject = it.next().unwrap_or("").to_string();
@@ -815,7 +952,10 @@ pub fn history(ws_path: &str) -> GitHistoryResult {
             refs: commit_refs,
         });
     }
-    GitHistoryResult { is_repo: true, commits }
+    GitHistoryResult {
+        is_repo: true,
+        commits,
+    }
 }
 
 /* ---------------- commit detail ---------------- */
@@ -851,8 +991,8 @@ pub struct GitCommitDetail {
 }
 
 /* Unlike status/diff/history, this one reports failure instead of returning an
-   empty default: the user asked for one specific commit, and silently showing
-   an empty page for a bad oid would read as "this commit is empty". */
+empty default: the user asked for one specific commit, and silently showing
+an empty page for a bad oid would read as "this commit is empty". */
 pub fn detail(ws_path: &str, oid: &str) -> Result<GitCommitDetail, String> {
     if git_dir_for(ws_path).is_none() {
         return Ok(GitCommitDetail::default());
@@ -863,16 +1003,22 @@ pub fn detail(ws_path: &str, oid: &str) -> Result<GitCommitDetail, String> {
     );
     let meta_args = ["show", "-s", meta_fmt.as_str(), "--no-color", oid];
     /* `--first-parent` is load-bearing here too: a plain `git show <merge>`
-       prints no diff at all, so every merge commit would look empty. With it,
-       a merge diffs against its first parent — which is what the graph row the
-       user clicked implies. */
+    prints no diff at all, so every merge commit would look empty. With it,
+    a merge diffs against its first parent — which is what the graph row the
+    user clicked implies. */
     let patch_args = [
-        "show", "--format=", "--patch", "--first-parent",
-        "--no-color", "--no-ext-diff", "--unified=3", oid,
+        "show",
+        "--format=",
+        "--patch",
+        "--first-parent",
+        "--no-color",
+        "--no-ext-diff",
+        "--unified=3",
+        oid,
     ];
 
     /* all three are independent; serially they are ~285ms of process startup
-       for one click, in parallel the page waits for the slowest single spawn */
+    for one click, in parallel the page waits for the slowest single spawn */
     let (meta, patch, mut refs) = std::thread::scope(|s| {
         let m = s.spawn(|| run_process(ws_path, &meta_args, None));
         let p = s.spawn(|| run_process(ws_path, &patch_args, None));
@@ -886,13 +1032,18 @@ pub fn detail(ws_path: &str, oid: &str) -> Result<GitCommitDetail, String> {
     let meta = meta.ok_or("git show could not be run")?;
     ensure_ok(&meta, "git show")?;
     /* a patch that failed to run is not fatal: the message, the parents and the
-       decorations are still worth showing, so an empty file list is the honest
-       degradation rather than an error page */
+    decorations are still worth showing, so an empty file list is the honest
+    degradation rather than an error page */
     let patch = patch.filter(|d| d.code == 0);
 
     let mut fields = meta.stdout.split(FIELD_SEP);
     let full = fields.next().unwrap_or("").trim().to_string();
-    let parents: Vec<String> = fields.next().unwrap_or("").split_whitespace().map(String::from).collect();
+    let parents: Vec<String> = fields
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .map(String::from)
+        .collect();
     let author = fields.next().unwrap_or("").to_string();
     let email = fields.next().unwrap_or("").to_string();
     let timestamp: i64 = fields.next().unwrap_or("0").trim().parse().unwrap_or(0);
@@ -955,7 +1106,7 @@ mod tests {
         run_process(&p, &["config", "user.email", "test@bentomux"], None).ok();
         run_process(&p, &["config", "user.name", "test"], None).ok();
         /* hermetic vs the machine's global config: commit.gpgsign=true makes
-           every commit spawn the agent's pinentry, which blocks headless runs */
+        every commit spawn the agent's pinentry, which blocks headless runs */
         run_process(&p, &["config", "commit.gpgsign", "false"], None).ok();
         run_process(&p, &["config", "tag.gpgsign", "false"], None).ok();
         p
@@ -1029,7 +1180,7 @@ mod tests {
         run_process(&repo, &["commit", "-qm", "side work"], None).unwrap();
         run_process(&repo, &["checkout", "-q", "-"], None).unwrap();
         /* annotated tag: its ref points at the tag object, not the commit, so
-           this is what exercises the %(*objectname) dereference */
+        this is what exercises the %(*objectname) dereference */
         run_process(&repo, &["tag", "-a", "v1.0", "-m", "release"], None).unwrap();
 
         let h = history(&repo);
@@ -1038,9 +1189,13 @@ mod tests {
         assert_eq!(h.commits[0].subject, "side work");
         assert_eq!(h.commits[1].subject, "first");
         /* the invariant the lane layout depends on: every parent appears
-           after its child */
-        let pos: std::collections::HashMap<&str, usize> =
-            h.commits.iter().enumerate().map(|(i, c)| (c.oid.as_str(), i)).collect();
+        after its child */
+        let pos: std::collections::HashMap<&str, usize> = h
+            .commits
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.oid.as_str(), i))
+            .collect();
         for (i, c) in h.commits.iter().enumerate() {
             for p in &c.parents {
                 if let Some(&pi) = pos.get(p.as_str()) {
@@ -1049,14 +1204,27 @@ mod tests {
             }
         }
         /* the checked-out branch is labelled, and marked as HEAD */
-        let head_refs: Vec<&GitRef> = h.commits.iter().flat_map(|c| &c.refs).filter(|r| r.head).collect();
+        let head_refs: Vec<&GitRef> = h
+            .commits
+            .iter()
+            .flat_map(|c| &c.refs)
+            .filter(|r| r.head)
+            .collect();
         assert_eq!(head_refs.len(), 1, "exactly one HEAD ref: {:?}", head_refs);
         assert_eq!(head_refs[0].kind, "branch");
-        assert!(!head_refs[0].name.contains('/'), "a local branch, not origin/…");
+        assert!(
+            !head_refs[0].name.contains('/'),
+            "a local branch, not origin/…"
+        );
 
         /* the annotated tag resolved to the commit it points at, and is not
-           mistaken for a branch */
-        let tagged: Vec<&GitRef> = h.commits.iter().flat_map(|c| &c.refs).filter(|r| r.kind == "tag").collect();
+        mistaken for a branch */
+        let tagged: Vec<&GitRef> = h
+            .commits
+            .iter()
+            .flat_map(|c| &c.refs)
+            .filter(|r| r.kind == "tag")
+            .collect();
         assert_eq!(tagged.len(), 1, "one tag ref: {:?}", tagged);
         assert_eq!(tagged[0].name, "v1.0");
         assert!(!tagged[0].head);
@@ -1066,11 +1234,24 @@ mod tests {
             h.commits[0].refs
         );
         /* the tag points at the base commit, which is also where HEAD went back
-           to — so that row carries both, and HEAD sorts first so the label row
-           reads like `git log --decorate` */
-        let decorated = h.commits.iter().find(|c| c.refs.iter().any(|r| r.head)).expect("a HEAD row");
-        assert_eq!(decorated.refs.len(), 2, "HEAD branch + tag: {:?}", decorated.refs);
-        assert!(decorated.refs[0].head, "HEAD ref leads the list: {:?}", decorated.refs);
+        to — so that row carries both, and HEAD sorts first so the label row
+        reads like `git log --decorate` */
+        let decorated = h
+            .commits
+            .iter()
+            .find(|c| c.refs.iter().any(|r| r.head))
+            .expect("a HEAD row");
+        assert_eq!(
+            decorated.refs.len(),
+            2,
+            "HEAD branch + tag: {:?}",
+            decorated.refs
+        );
+        assert!(
+            decorated.refs[0].head,
+            "HEAD ref leads the list: {:?}",
+            decorated.refs
+        );
         assert_eq!(decorated.refs[1].kind, "tag");
         assert_eq!(h.commits[0].short.len(), 7);
         assert!(h.commits[0].timestamp > 0);
@@ -1079,7 +1260,7 @@ mod tests {
     #[test]
     fn count_patch_lines_counts_hunk_content_only() {
         /* a line whose content starts with `--` or `++` is content, not a file
-           header, and must still count */
+        header, and must still count */
         let block = "a/x.txt b/x.txt\n\
 index 111..222 100644\n\
 --- a/x.txt\n\
@@ -1123,7 +1304,11 @@ index 111..222 100644\n\
         assert_eq!((d.additions, d.deletions), (1, 0));
         assert!(d.files[0].patch.contains("@@"));
         /* HEAD points at the newest commit, so that is the decorated one */
-        assert!(d.refs.iter().any(|r| r.head), "the HEAD branch is decorated: {:?}", d.refs);
+        assert!(
+            d.refs.iter().any(|r| r.head),
+            "the HEAD branch is decorated: {:?}",
+            d.refs
+        );
 
         /* a multi-line message keeps its body, minus the subject */
         let root = d.parents[0].clone();
@@ -1132,11 +1317,15 @@ index 111..222 100644\n\
         assert_eq!(first.body, "Why it matters.");
         assert!(first.parents.is_empty(), "root commit has no parents");
         assert_eq!(first.files[0].status, "A");
-        assert!(first.refs.is_empty(), "the root commit carries no refs: {:?}", first.refs);
+        assert!(
+            first.refs.is_empty(),
+            "the root commit carries no refs: {:?}",
+            first.refs
+        );
     }
 
     /* `git show <merge>` prints no diff at all, so without --first-parent every
-       merge commit would render as an empty page. This is the guard for that. */
+    merge commit would render as an empty page. This is the guard for that. */
     #[test]
     fn git_detail_of_a_merge_diffs_against_its_first_parent() {
         let repo = temp_repo("detail-merge");
@@ -1148,7 +1337,12 @@ index 111..222 100644\n\
         run_process(&repo, &["add", "b.txt"], None).unwrap();
         run_process(&repo, &["commit", "-qm", "side work"], None).unwrap();
         run_process(&repo, &["checkout", "-q", "-"], None).unwrap();
-        run_process(&repo, &["merge", "-q", "--no-ff", "side", "-m", "merge side"], None).unwrap();
+        run_process(
+            &repo,
+            &["merge", "-q", "--no-ff", "side", "-m", "merge side"],
+            None,
+        )
+        .unwrap();
 
         let head = history(&repo).commits[0].oid.clone();
         let d = detail(&repo, &head).expect("detail for the merge");
@@ -1168,14 +1362,18 @@ index 111..222 100644\n\
         assert!(detail(&repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef").is_err());
         /* outside a repo there is nothing to look up, but that is not an error */
         let outside = std::env::temp_dir().to_string_lossy().into_owned();
-        assert!(!detail(&outside, "HEAD").expect("not-a-repo is a value").is_repo);
+        assert!(
+            !detail(&outside, "HEAD")
+                .expect("not-a-repo is a value")
+                .is_repo
+        );
     }
 
     #[test]
     fn git_detail_line_counts_match_git_numstat() {
         /* the counts are derived from the patch rather than a second --numstat
-           call, so this cross-checks them against git's own arithmetic on a
-           commit that adds, deletes, and renames in one go */
+        call, so this cross-checks them against git's own arithmetic on a
+        commit that adds, deletes, and renames in one go */
         let repo = temp_repo("detail-counts");
         write_file(&repo, "keep.txt", "a\nb\nc\n");
         write_file(&repo, "gone.txt", "x\n");
@@ -1192,10 +1390,20 @@ index 111..222 100644\n\
 
         let head = history(&repo).commits[0].oid.clone();
         let d = detail(&repo, &head).expect("detail for the mixed commit");
-        assert_eq!(d.files.len(), 4, "add, delete, rename, modify: {:?}", d.files);
+        assert_eq!(
+            d.files.len(),
+            4,
+            "add, delete, rename, modify: {:?}",
+            d.files
+        );
 
         /* git's own numbers for the same commit */
-        let ns = run_process(&repo, &["show", "--numstat", "--format=", "--first-parent", &head], None).unwrap();
+        let ns = run_process(
+            &repo,
+            &["show", "--numstat", "--format=", "--first-parent", &head],
+            None,
+        )
+        .unwrap();
         let mut expected = 0u64;
         for line in ns.stdout.lines().filter(|l| !l.trim().is_empty()) {
             let mut it = line.splitn(3, '\t');
@@ -1206,13 +1414,32 @@ index 111..222 100644\n\
             }
             expected += a.parse::<u64>().unwrap_or(0);
         }
-        assert_eq!(d.additions, expected, "additions disagree with git --numstat");
+        assert_eq!(
+            d.additions, expected,
+            "additions disagree with git --numstat"
+        );
 
-        let modified = d.files.iter().find(|f| f.path == "keep.txt").expect("keep.txt");
-        assert_eq!((modified.additions, modified.deletions), (2, 1), "replaced b with B and appended d");
-        let renamed = d.files.iter().find(|f| f.path == "new.txt").expect("rename target");
+        let modified = d
+            .files
+            .iter()
+            .find(|f| f.path == "keep.txt")
+            .expect("keep.txt");
+        assert_eq!(
+            (modified.additions, modified.deletions),
+            (2, 1),
+            "replaced b with B and appended d"
+        );
+        let renamed = d
+            .files
+            .iter()
+            .find(|f| f.path == "new.txt")
+            .expect("rename target");
         assert_eq!(renamed.status, "R");
-        let removed = d.files.iter().find(|f| f.path == "gone.txt").expect("gone.txt");
+        let removed = d
+            .files
+            .iter()
+            .find(|f| f.path == "gone.txt")
+            .expect("gone.txt");
         assert_eq!((removed.status.as_str(), removed.deletions), ("D", 1));
     }
 
@@ -1250,8 +1477,8 @@ index 111..222 100644\n\
     }
 
     /* porcelain -z splits renames across NUL segments. Faithful to the Electron
-       port: the original code consumed the next NUL segment as the path,
-       which for git's `R <target>\0<source>` shape yields the source name. */
+    port: the original code consumed the next NUL segment as the path,
+    which for git's `R <target>\0<source>` shape yields the source name. */
     #[test]
     fn git_status_reports_rename() {
         let repo = temp_repo("rename");
@@ -1261,8 +1488,11 @@ index 111..222 100644\n\
         run_process(&repo, &["mv", "old.txt", "moved.txt"], None).unwrap();
         let st = status(&repo);
         assert!(st.is_repo);
-        assert!(st.entries.iter().any(|e| e.index_status == "R"),
-            "rename detected with index R: {:?}", st.entries);
+        assert!(
+            st.entries.iter().any(|e| e.index_status == "R"),
+            "rename detected with index R: {:?}",
+            st.entries
+        );
     }
 
     #[test]
@@ -1314,7 +1544,12 @@ index 111..222 100644\n\
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
         loop {
-            if seen.lock().unwrap().iter().any(|b| b.as_deref() == Some("feature-x")) {
+            if seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|b| b.as_deref() == Some("feature-x"))
+            {
                 unwatch_workspace("watch-ws");
                 return;
             }

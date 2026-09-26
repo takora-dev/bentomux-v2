@@ -1,7 +1,7 @@
 /* ---------------- cached PTY screen snapshots ----------------
-   The authoritative vt100 parser lives in terminal.rs inside the persistent
-   PTY host. This module is deliberately a cache only: runtime detection and
-   remote rendering consume snapshots produced by that single parser. */
+The authoritative vt100 parser lives in terminal.rs inside the persistent
+PTY host. This module is deliberately a cache only: runtime detection and
+remote rendering consume snapshots produced by that single parser. */
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -17,8 +17,8 @@ pub fn update_snapshot(id: &str, snapshot: TerminalSnapshot) {
     let mut guard = screens().lock().unwrap();
     match guard.get_mut(id) {
         /* hot tick carries text+meta only (see terminal.rs snapshot()): keep
-           the cached html from the last explicit render so the remote mirror
-           does not go blank between watched renders */
+        the cached html from the last explicit render so the remote mirror
+        does not go blank between watched renders */
         Some(cur) if snapshot.html.is_empty() => {
             cur.text = snapshot.text;
             cur.title = snapshot.title;
@@ -36,7 +36,12 @@ pub fn clear_snapshot(id: &str) {
 }
 
 pub fn screen_dump(id: &str) -> String {
-    screens().lock().unwrap().get(id).map(|s| s.text.clone()).unwrap_or_default()
+    screens()
+        .lock()
+        .unwrap()
+        .get(id)
+        .map(|s| s.text.clone())
+        .unwrap_or_default()
 }
 
 pub fn screen_lines(id: &str) -> Vec<String> {
@@ -57,7 +62,12 @@ pub fn screen_meta(id: &str) -> (String, String, u64) {
 }
 
 pub fn screen_dump_html(id: &str) -> String {
-    screens().lock().unwrap().get(id).map(|s| s.html.clone()).unwrap_or_default()
+    screens()
+        .lock()
+        .unwrap()
+        .get(id)
+        .map(|s| s.html.clone())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

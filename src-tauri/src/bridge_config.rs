@@ -1,6 +1,6 @@
 /* ---------------- bridge address + shell env ----------------
-   Rust port of src/main/bridge-config.ts. Shared by pty.rs (env
-   injection) and bridge.rs (listener) without either importing the other. */
+Rust port of src/main/bridge-config.ts. Shared by pty.rs (env
+injection) and bridge.rs (listener) without either importing the other. */
 
 use std::collections::HashMap;
 
@@ -8,7 +8,7 @@ pub const BRIDGE_PANE_ENV: &str = "BENTOMUX_PANE_ID";
 pub const BRIDGE_ADDR_ENV: &str = "BENTOMUX_BRIDGE";
 
 /* dev instances with an isolated store (BENTOMUX_USER_DATA_SUFFIX / smoke)
-   get their own address so hook events never cross between instances */
+get their own address so hook events never cross between instances */
 pub fn instance_suffix() -> String {
     if std::env::var_os("BENTOMUX_SMOKE").is_some() {
         "-smoke".to_string()
@@ -29,7 +29,7 @@ pub fn bridge_address() -> String {
 }
 
 /* expose both Bentomux names and the Herdr-compatible names consumed by the
-   Pi/OMP integrations supplied in integration_assets */
+Pi/OMP integrations supplied in integration_assets */
 pub fn bridge_env_for(pane_id: &str) -> HashMap<String, String> {
     let address = bridge_address();
     HashMap::from([
@@ -67,7 +67,10 @@ mod tests {
     fn test_bridge_env_pairs() {
         let env = bridge_env_for("t-abc");
         assert_eq!(env.get(BRIDGE_PANE_ENV).map(String::as_str), Some("t-abc"));
-        assert_eq!(env.get(BRIDGE_ADDR_ENV).map(String::as_str), Some(bridge_address().as_str()));
+        assert_eq!(
+            env.get(BRIDGE_ADDR_ENV).map(String::as_str),
+            Some(bridge_address().as_str())
+        );
     }
 
     #[test]
@@ -75,6 +78,9 @@ mod tests {
         let env = bridge_env_for("t-omp");
         assert_eq!(env.get("HERDR_ENV").map(String::as_str), Some("1"));
         assert_eq!(env.get("HERDR_PANE_ID").map(String::as_str), Some("t-omp"));
-        assert_eq!(env.get("HERDR_SOCKET_PATH").map(String::as_str), Some(bridge_address().as_str()));
+        assert_eq!(
+            env.get("HERDR_SOCKET_PATH").map(String::as_str),
+            Some(bridge_address().as_str())
+        );
     }
 }

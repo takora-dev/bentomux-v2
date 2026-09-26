@@ -1,9 +1,9 @@
 /* ---------------- plugin platform: IPC commands ----------------
-   Spec: docs/PLUGIN_PLATFORM.md §8, §11.
+Spec: docs/PLUGIN_PLATFORM.md §8, §11.
 
-   Every command here is reachable from the renderer's bridge. Mutating ones
-   go through AppStateManager::patch_state so the registry is persisted in the
-   same call that changes it — the plugin list must never be ahead of disk. */
+Every command here is reachable from the renderer's bridge. Mutating ones
+go through AppStateManager::patch_state so the registry is persisted in the
+same call that changes it — the plugin list must never be ahead of disk. */
 
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -77,12 +77,12 @@ fn plugin_paths(app: &tauri::AppHandle) -> PluginResult<registry::PluginPaths> {
     let mut paths = registry::PluginPaths::new(&base);
 
     /* bundled plugins ship as a resource directory. The dev fallback mirrors
-       bridge.rs: the bundler rewrites a leading `..` to `_up_`, and running
-       from a source tree has no resource dir at all. */
-    if let Ok(dir) = app
-        .path()
-        .resolve("../resources/plugin-bundled", tauri::path::BaseDirectory::Resource)
-    {
+    bridge.rs: the bundler rewrites a leading `..` to `_up_`, and running
+    from a source tree has no resource dir at all. */
+    if let Ok(dir) = app.path().resolve(
+        "../resources/plugin-bundled",
+        tauri::path::BaseDirectory::Resource,
+    ) {
         if dir.is_dir() {
             paths = paths.with_bundled(dir);
         }
@@ -196,7 +196,7 @@ pub fn plugin_scaffold(
         )));
     };
     /* the template name comes from the renderer, so it is untrusted input:
-       resolve it through safe_join rather than joining a raw string */
+    resolve it through safe_join rather than joining a raw string */
     let source = crate::plugin::safe_join(&root, &template)
         .ok_or_else(|| String::from(PluginError::NotFound(format!("template `{}`", template))))?;
     if !source.is_dir() {
@@ -231,8 +231,8 @@ pub fn plugin_scaffold(
     copy_scaffold(&source, dest_path, &values).map_err(String::from)?;
 
     /* validate what we just wrote: a scaffold that does not validate is a bug
-       in the template, and the user should hear about it immediately rather
-       than after writing code against it */
+    in the template, and the user should hear about it immediately rather
+    than after writing code against it */
     let report = validate_dir_with(dest_path, &ValidateOptions::default());
     Ok(report)
 }
@@ -280,13 +280,11 @@ const SKILL_ID: &str = "bentomux-plugin-author";
 /// listed: installing into a runtime whose layout we do not understand would
 /// be guessing.
 fn skill_targets(home: &std::path::Path) -> Vec<(String, String, std::path::PathBuf)> {
-    vec![
-        (
-            "claude".to_string(),
-            "Claude Code".to_string(),
-            home.join(".claude").join("skills"),
-        ),
-    ]
+    vec![(
+        "claude".to_string(),
+        "Claude Code".to_string(),
+        home.join(".claude").join("skills"),
+    )]
 }
 
 #[derive(serde::Serialize)]
@@ -370,7 +368,9 @@ pub fn plugin_install_skill(agent_id: String, app: tauri::AppHandle) -> Result<S
 /// Plugin Studio calls before showing the "Install" button.
 #[tauri::command]
 pub fn plugin_validate(path: String, bundled: Option<bool>) -> ValidationReport {
-    let opts = ValidateOptions { bundled: bundled.unwrap_or(false) };
+    let opts = ValidateOptions {
+        bundled: bundled.unwrap_or(false),
+    };
     validate::validate_dir_with(std::path::Path::new(&path), &opts)
 }
 
@@ -401,8 +401,8 @@ pub fn plugin_install_folder(
     state: State<'_, AppStateManager>,
 ) -> Result<PluginRecord, String> {
     let paths = plugin_paths(&app).map_err(String::from)?;
-    let record = registry::install_from_folder(&paths, std::path::Path::new(&path))
-        .map_err(String::from)?;
+    let record =
+        registry::install_from_folder(&paths, std::path::Path::new(&path)).map_err(String::from)?;
 
     state.patch_state(|s| {
         /* reinstalling replaces the record rather than duplicating it */
@@ -440,7 +440,7 @@ pub async fn plugin_install_url(
 ) -> Result<PluginRecord, String> {
     let paths = plugin_paths(&app).map_err(String::from)?;
     /* blocking HTTP on a worker thread: the download must not stall the
-       webview's IPC thread while the user watches a spinner */
+    webview's IPC thread while the user watches a spinner */
     let record = tauri::async_runtime::spawn_blocking(move || {
         registry::install_from_url(&paths, &url, &sha256)
     })
@@ -485,8 +485,8 @@ pub fn plugin_update(
     state: State<'_, AppStateManager>,
 ) -> Result<PluginRecord, String> {
     let paths = plugin_paths(&app).map_err(String::from)?;
-    let fresh = registry::install_from_folder(&paths, std::path::Path::new(&path))
-        .map_err(String::from)?;
+    let fresh =
+        registry::install_from_folder(&paths, std::path::Path::new(&path)).map_err(String::from)?;
 
     let mut out: Option<PluginRecord> = None;
     state.patch_state(|s| {
@@ -626,8 +626,8 @@ pub fn plugin_leave_safe_mode(
         s.boot_attempts = 0;
     });
     /* a reload is the honest way back: plugin modules are already imported in
-       this realm and cannot be unloaded, so re-activating them in place would
-       double-register every contribution */
+    this realm and cannot be unloaded, so re-activating them in place would
+    double-register every contribution */
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.eval("window.location.reload()");
     }
@@ -639,14 +639,15 @@ mod tests {
     use super::*;
 
     fn tmp(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("bentomux-scaffold-{}-{}", tag, std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("bentomux-scaffold-{}-{}", tag, std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
     /* the substitution is what turns a template into a plugin; a missed
-       placeholder would ship a manifest with a literal `{{id}}` in it */
+    placeholder would ship a manifest with a literal `{{id}}` in it */
     #[test]
     fn copy_scaffold_substitutes_every_placeholder() {
         let base = tmp("subst");
@@ -664,7 +665,13 @@ mod tests {
         copy_scaffold(
             &from,
             &to,
-            &[("id", "acme.x"), ("name", "X"), ("version", "1.0.0"), ("description", ""), ("author", "")],
+            &[
+                ("id", "acme.x"),
+                ("name", "X"),
+                ("version", "1.0.0"),
+                ("description", ""),
+                ("author", ""),
+            ],
         )
         .unwrap();
 
@@ -684,7 +691,10 @@ mod tests {
         let to = base.join("out");
 
         copy_scaffold(&from, &to, &[("name", "Deep")]).unwrap();
-        assert_eq!(std::fs::read_to_string(to.join("assets").join("note.txt")).unwrap(), "Deep");
+        assert_eq!(
+            std::fs::read_to_string(to.join("assets").join("note.txt")).unwrap(),
+            "Deep"
+        );
 
         std::fs::remove_dir_all(&base).ok();
     }

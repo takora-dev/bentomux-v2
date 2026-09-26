@@ -1,18 +1,18 @@
 /* ---------------- plugin platform: the `plugin://` asset scheme ----------------
-   Spec: docs/PLUGIN_PLATFORM.md §10. Decision: docs/adr/0003.
+Spec: docs/PLUGIN_PLATFORM.md §10. Decision: docs/adr/0003.
 
-   Plugin code and assets are served to the webview from a custom scheme rather
-   than eval / blob: / data:, so every plugin has a real, inspectable URL space
-   the loader can cache-bust and a reviewer can trace. The production CSP names
-   this scheme in script-src / style-src / img-src and widens nothing else.
+Plugin code and assets are served to the webview from a custom scheme rather
+than eval / blob: / data:, so every plugin has a real, inspectable URL space
+the loader can cache-bust and a reviewer can trace. The production CSP names
+this scheme in script-src / style-src / img-src and widens nothing else.
 
-   URL forms (they differ per platform, and the CSP must name both):
-     macOS, Linux : plugin://localhost/<plugin-id>/<path>
-     Windows      : http://plugin.localhost/<plugin-id>/<path>
+URL forms (they differ per platform, and the CSP must name both):
+  macOS, Linux : plugin://localhost/<plugin-id>/<path>
+  Windows      : http://plugin.localhost/<plugin-id>/<path>
 
-   The handler is the one place a plugin-supplied path reaches the filesystem,
-   so it resolves through safe_join and refuses anything outside the plugin's
-   own installed version directory. */
+The handler is the one place a plugin-supplied path reaches the filesystem,
+so it resolves through safe_join and refuses anything outside the plugin's
+own installed version directory. */
 
 use tauri::http::{Request, Response, StatusCode};
 use tauri::{Manager, UriSchemeContext, UriSchemeResponder};
@@ -119,7 +119,11 @@ fn forbidden(reason: &str) -> Response<Vec<u8>> {
  */
 const CORS: (&str, &str) = ("Access-Control-Allow-Origin", "*");
 
-pub fn handle(ctx: UriSchemeContext<'_, tauri::Wry>, request: Request<Vec<u8>>, responder: UriSchemeResponder) {
+pub fn handle(
+    ctx: UriSchemeContext<'_, tauri::Wry>,
+    request: Request<Vec<u8>>,
+    responder: UriSchemeResponder,
+) {
     let path = request.uri().path().to_string();
 
     let Some((id, rel)) = split_path(&path) else {
@@ -156,7 +160,7 @@ pub fn handle(ctx: UriSchemeContext<'_, tauri::Wry>, request: Request<Vec<u8>>, 
                 .header("Content-Type", content_type_for(&resolved))
                 .header(CORS.0, CORS.1)
                 /* plugin code is fetched as a module; a stale cache would keep
-                   running the previous version after an update */
+                running the previous version after an update */
                 .header("Cache-Control", "no-cache")
                 .body(bytes)
                 .unwrap_or_else(|_| Response::new(Vec::new()));
@@ -173,15 +177,18 @@ mod tests {
     #[test]
     fn splits_plugin_id_from_asset_path() {
         assert_eq!(split_path("/acme.t/index.js"), Some(("acme.t", "index.js")));
-        assert_eq!(split_path("/acme.t/assets/icon.svg"), Some(("acme.t", "assets/icon.svg")));
+        assert_eq!(
+            split_path("/acme.t/assets/icon.svg"),
+            Some(("acme.t", "assets/icon.svg"))
+        );
         assert_eq!(split_path("/acme.t"), Some(("acme.t", "")));
         assert_eq!(split_path("/"), None);
         assert_eq!(split_path(""), None);
     }
 
     /* Every response must carry the CORS header. Without it the browser
-       refuses a module fetch and the only symptom is "Failed to fetch
-       dynamically imported module", which points at nothing. */
+    refuses a module fetch and the only symptom is "Failed to fetch
+    dynamically imported module", which points at nothing. */
     #[test]
     fn every_response_carries_cors() {
         for response in [not_found(), forbidden("nope")] {
@@ -198,12 +205,27 @@ mod tests {
     #[test]
     fn content_types_cover_what_plugins_ship() {
         use std::path::Path;
-        assert_eq!(content_type_for(Path::new("a.js")), "text/javascript; charset=utf-8");
-        assert_eq!(content_type_for(Path::new("a.mjs")), "text/javascript; charset=utf-8");
-        assert_eq!(content_type_for(Path::new("a.css")), "text/css; charset=utf-8");
+        assert_eq!(
+            content_type_for(Path::new("a.js")),
+            "text/javascript; charset=utf-8"
+        );
+        assert_eq!(
+            content_type_for(Path::new("a.mjs")),
+            "text/javascript; charset=utf-8"
+        );
+        assert_eq!(
+            content_type_for(Path::new("a.css")),
+            "text/css; charset=utf-8"
+        );
         assert_eq!(content_type_for(Path::new("a.svg")), "image/svg+xml");
         assert_eq!(content_type_for(Path::new("a.png")), "image/png");
-        assert_eq!(content_type_for(Path::new("a.unknown")), "application/octet-stream");
-        assert_eq!(content_type_for(Path::new("noext")), "application/octet-stream");
+        assert_eq!(
+            content_type_for(Path::new("a.unknown")),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            content_type_for(Path::new("noext")),
+            "application/octet-stream"
+        );
     }
 }

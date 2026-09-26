@@ -1,15 +1,15 @@
 /* ---------------- approval overlay window (floating "dynamic island") ----------------
-   Port of src/main/overlay.ts from the Electron build. When Bentomux is
-   not the frontmost window, a PermissionRequest pops a small always-on-top
-   pill at the top-center of the SCREEN so the decision can be made without
-   switching to Bentomux (e.g. while browsing).
+Port of src/main/overlay.ts from the Electron build. When Bentomux is
+not the frontmost window, a PermissionRequest pops a small always-on-top
+pill at the top-center of the SCREEN so the decision can be made without
+switching to Bentomux (e.g. while browsing).
 
-   The overlay loads the bundled `approval.html` page (built by Vite),
-   which subscribes to the same `agent:approval` / `agent:approvalClosed`
-   events and resolves/denies/jumps over the shared IPC bridge
-   (resolveApproval, approvalJump). The window never takes focus — the
-   user's foreground app keeps keyboard input. Resizing persists the size
-   to prefs.approvalOverlay. */
+The overlay loads the bundled `approval.html` page (built by Vite),
+which subscribes to the same `agent:approval` / `agent:approvalClosed`
+events and resolves/denies/jumps over the shared IPC bridge
+(resolveApproval, approvalJump). The window never takes focus — the
+user's foreground app keeps keyboard input. Resizing persists the size
+to prefs.approvalOverlay. */
 
 use tauri::{
     AppHandle, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent,
@@ -20,13 +20,13 @@ const OVERLAY_MIN_H: f64 = 220.0;
 const LABEL: &str = "approval-overlay";
 
 /* the Vite dev server / bundled assets live at the same origin as the main
-   window, so approval.html resolves naturally in both dev and prod. */
+window, so approval.html resolves naturally in both dev and prod. */
 const OVERLAY_PAGE: &str = "approval.html";
 
 fn current_position(app: &AppHandle, w: f64, h: f64) -> (f64, f64) {
     /* center horizontally over the main window's monitor work area, anchored
-       10px from the top of the screen — mirrors Electron's
-       screen.getPrimaryDisplay().workArea math. */
+    10px from the top of the screen — mirrors Electron's
+    screen.getPrimaryDisplay().workArea math. */
     let win = app.get_webview_window("main");
     let (wx, wy, ww, wh) = match win {
         Some(w) if w.current_monitor().ok().flatten().is_some() => {
@@ -61,9 +61,9 @@ fn pref_size(app: &AppHandle) -> (f64, f64) {
 }
 
 /* create the overlay window on first request; subsequent requests just
-   re-show it and re-center. The page itself subscribes to `agent:approval`
-   (which the bridge already emits for every request) and renders it, so no
-   per-request payload is passed through the window URL. */
+re-show it and re-center. The page itself subscribes to `agent:approval`
+(which the bridge already emits for every request) and renders it, so no
+per-request payload is passed through the window URL. */
 pub fn show_approval_overlay(app: &AppHandle) {
     let (w, h) = pref_size(app);
     let (x, y) = current_position(app, w, h);
@@ -72,7 +72,7 @@ pub fn show_approval_overlay(app: &AppHandle) {
         let _ = existing.set_position(LogicalPosition::new(x, y));
         let _ = existing.set_size(LogicalSize::new(w, h));
         /* show WITHOUT focusing — the overlay must never steal keyboard from
-           the user's foreground app (Electron's showInactive + focusable:false) */
+        the user's foreground app (Electron's showInactive + focusable:false) */
         let _ = existing.show();
         return;
     }
@@ -117,7 +117,7 @@ pub fn show_approval_overlay(app: &AppHandle) {
         }
         Err(e) => {
             /* do not crash the app if the window can't be created; the
-               request is still visible in the main window / bridge. */
+            request is still visible in the main window / bridge. */
             eprintln!("[bentomux] approval overlay failed to open: {e}");
         }
     }

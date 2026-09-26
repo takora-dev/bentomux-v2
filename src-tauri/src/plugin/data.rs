@@ -1,19 +1,19 @@
 /* ---------------- plugin platform: per-plugin data store ----------------
-   Spec: docs/PLUGIN_PLATFORM.md §9.
+Spec: docs/PLUGIN_PLATFORM.md §9.
 
-   `ctx.storage` is one JSON file per plugin under `plugin-data/<id>.json`,
-   written with the same temp-then-rename discipline as the app store so a
-   crash mid-write cannot truncate a user's data.
+`ctx.storage` is one JSON file per plugin under `plugin-data/<id>.json`,
+written with the same temp-then-rename discipline as the app store so a
+crash mid-write cannot truncate a user's data.
 
-   This is the user's data, not the plugin's: uninstalling a plugin keeps its
-   file unless the user explicitly asks for removal (registry::uninstall). */
+This is the user's data, not the plugin's: uninstalling a plugin keeps its
+file unless the user explicitly asks for removal (registry::uninstall). */
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use super::{PluginError, PluginResult};
 use super::registry::PluginPaths;
+use super::{PluginError, PluginResult};
 
 /// Soft cap on one plugin's stored values. A plugin that needs more than this
 /// is using the wrong storage, and a clear error beats a silent truncation.
@@ -23,7 +23,7 @@ type Map = BTreeMap<String, serde_json::Value>;
 
 fn read(path: &Path) -> Map {
     /* a missing or corrupt file reads as empty: plugin data is a convenience,
-       never something the app must refuse to start over */
+    never something the app must refuse to start over */
     fs::read_to_string(path)
         .ok()
         .and_then(|t| serde_json::from_str::<Map>(&t).ok())
@@ -53,12 +53,7 @@ pub fn get(paths: &PluginPaths, id: &str, key: &str) -> PluginResult<Option<serd
     Ok(read(&paths.data_file(id)).get(key).cloned())
 }
 
-pub fn set(
-    paths: &PluginPaths,
-    id: &str,
-    key: &str,
-    value: serde_json::Value,
-) -> PluginResult<()> {
+pub fn set(paths: &PluginPaths, id: &str, key: &str, value: serde_json::Value) -> PluginResult<()> {
     let path = paths.data_file(id);
     let mut map = read(&path);
     map.insert(key.to_string(), value);
@@ -81,8 +76,8 @@ mod tests {
     use super::*;
 
     fn paths(tag: &str) -> (PluginPaths, std::path::PathBuf) {
-        let root = std::env::temp_dir()
-            .join(format!("bentomux-pdata-{}-{}", tag, std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("bentomux-pdata-{}-{}", tag, std::process::id()));
         fs::remove_dir_all(&root).ok();
         fs::create_dir_all(&root).unwrap();
         (PluginPaths::new(&root), root)
@@ -94,9 +89,18 @@ mod tests {
         set(&p, "acme.t", "count", serde_json::json!(3)).unwrap();
         set(&p, "acme.t", "label", serde_json::json!("hi")).unwrap();
 
-        assert_eq!(get(&p, "acme.t", "count").unwrap(), Some(serde_json::json!(3)));
-        assert_eq!(get(&p, "acme.t", "label").unwrap(), Some(serde_json::json!("hi")));
-        assert_eq!(keys(&p, "acme.t"), vec!["count".to_string(), "label".to_string()]);
+        assert_eq!(
+            get(&p, "acme.t", "count").unwrap(),
+            Some(serde_json::json!(3))
+        );
+        assert_eq!(
+            get(&p, "acme.t", "label").unwrap(),
+            Some(serde_json::json!("hi"))
+        );
+        assert_eq!(
+            keys(&p, "acme.t"),
+            vec!["count".to_string(), "label".to_string()]
+        );
 
         fs::remove_dir_all(&root).ok();
     }
@@ -129,8 +133,14 @@ mod tests {
         set(&p, "acme.a", "k", serde_json::json!("a")).unwrap();
         set(&p, "acme.b", "k", serde_json::json!("b")).unwrap();
 
-        assert_eq!(get(&p, "acme.a", "k").unwrap(), Some(serde_json::json!("a")));
-        assert_eq!(get(&p, "acme.b", "k").unwrap(), Some(serde_json::json!("b")));
+        assert_eq!(
+            get(&p, "acme.a", "k").unwrap(),
+            Some(serde_json::json!("a"))
+        );
+        assert_eq!(
+            get(&p, "acme.b", "k").unwrap(),
+            Some(serde_json::json!("b"))
+        );
 
         fs::remove_dir_all(&root).ok();
     }
@@ -155,7 +165,11 @@ mod tests {
         let big = "x".repeat((MAX_DATA_BYTES as usize) + 1024);
         let err = set(&p, "acme.t", "k", serde_json::json!(big));
         assert!(matches!(err, Err(PluginError::Conflict(_))));
-        assert_eq!(get(&p, "acme.t", "k").unwrap(), None, "nothing partial written");
+        assert_eq!(
+            get(&p, "acme.t", "k").unwrap(),
+            None,
+            "nothing partial written"
+        );
 
         fs::remove_dir_all(&root).ok();
     }

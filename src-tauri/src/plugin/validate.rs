@@ -1,15 +1,15 @@
 /* ---------------- plugin platform: static validation ----------------
-   Spec: docs/PLUGIN_PLATFORM.md §11.
+Spec: docs/PLUGIN_PLATFORM.md §11.
 
-   The Validator answers one question without executing anything: would this
-   folder install and activate cleanly? It is the surface an authoring agent
-   loops against (`bentomux --plugin-validate <dir> --json`), so every issue
-   carries a stable `code` the caller can branch on, and the report is
-   JSON-serializable as-is.
+The Validator answers one question without executing anything: would this
+folder install and activate cleanly? It is the surface an authoring agent
+loops against (`bentomux --plugin-validate <dir> --json`), so every issue
+carries a stable `code` the caller can branch on, and the report is
+JSON-serializable as-is.
 
-   Deliberately NOT here: JavaScript syntax checking. That needs a parser the
-   app does not ship; the CLI surface shells out to `node --check` and the
-   in-app surface surfaces a SyntaxError at activation instead. */
+Deliberately NOT here: JavaScript syntax checking. That needs a parser the
+app does not ship; the CLI surface shells out to `node --check` and the
+in-app surface surfaces a SyntaxError at activation instead. */
 
 use serde::Serialize;
 use std::fs;
@@ -64,7 +64,11 @@ pub struct Issue {
 
 impl Issue {
     fn new(code: &str, message: impl Into<String>) -> Self {
-        Issue { code: code.to_string(), message: message.into(), path: None }
+        Issue {
+            code: code.to_string(),
+            message: message.into(),
+            path: None,
+        }
     }
 
     fn at(code: &str, message: impl Into<String>, path: impl Into<String>) -> Self {
@@ -88,7 +92,12 @@ pub struct ValidationReport {
 
 impl ValidationReport {
     fn empty() -> Self {
-        ValidationReport { ok: false, manifest: None, errors: vec![], warnings: vec![] }
+        ValidationReport {
+            ok: false,
+            manifest: None,
+            errors: vec![],
+            warnings: vec![],
+        }
     }
 
     fn finish(mut self) -> Self {
@@ -201,7 +210,10 @@ fn read_manifest(root: &Path) -> ManifestRead {
 /// Walk a manifest that failed the strict parse, reporting every structural
 /// problem and salvaging whatever fields are usable so the semantic checks
 /// can still run over them.
-fn diagnose(raw: &serde_json::Value, strict_error: &serde_json::Error) -> (PluginManifest, Vec<Issue>) {
+fn diagnose(
+    raw: &serde_json::Value,
+    strict_error: &serde_json::Error,
+) -> (PluginManifest, Vec<Issue>) {
     let mut issues = Vec::new();
     let mut salvage = PluginManifest::default();
 
@@ -239,7 +251,7 @@ fn diagnose(raw: &serde_json::Value, strict_error: &serde_json::Error) -> (Plugi
     }
 
     /* strings the semantic pass can work with. `name` is the exception: no
-       other check covers it, so its absence is reported here. */
+    other check covers it, so its absence is reported here. */
     for field in ["id", "version", "entry"] {
         match obj.get(field) {
             None => issues.push(Issue::at(
@@ -342,8 +354,8 @@ fn diagnose(raw: &serde_json::Value, strict_error: &serde_json::Error) -> (Plugi
     }
 
     /* contributions: name every key that is not a known kind, and every kind
-       whose value is not a list. A typo here silently contributes nothing at
-       runtime, which is the failure mode hardest to notice by hand. */
+    whose value is not a list. A typo here silently contributes nothing at
+    runtime, which is the failure mode hardest to notice by hand. */
     if let Some(v) = obj.get("contributes") {
         match v.as_object() {
             None => issues.push(Issue::at(
@@ -366,7 +378,9 @@ fn diagnose(raw: &serde_json::Value, strict_error: &serde_json::Error) -> (Plugi
                     }
                 }
                 for kind in super::CONTRIBUTION_KINDS {
-                    let Some(value) = map.get(*kind) else { continue };
+                    let Some(value) = map.get(*kind) else {
+                        continue;
+                    };
                     let Some(array) = value.as_array() else {
                         issues.push(Issue::at(
                             codes::MANIFEST_INVALID,
@@ -393,11 +407,14 @@ fn diagnose(raw: &serde_json::Value, strict_error: &serde_json::Error) -> (Plugi
     }
 
     /* the strict parser's own message is the catch-all: if the diagnosis above
-       found nothing specific, the author still needs to know something failed */
+    found nothing specific, the author still needs to know something failed */
     if issues.is_empty() {
         issues.push(Issue::at(
             codes::MANIFEST_INVALID,
-            format!("plugin.json does not match the manifest schema: {}", strict_error),
+            format!(
+                "plugin.json does not match the manifest schema: {}",
+                strict_error
+            ),
             "plugin.json",
         ));
     }
@@ -423,14 +440,20 @@ fn check_identity(m: &PluginManifest, opts: &ValidateOptions, report: &mut Valid
     if !valid_id(&m.id) {
         report.errors.push(Issue::at(
             codes::ID_SHAPE,
-            format!("id `{}` must be `publisher.name`, lowercase letters/digits/dashes only", m.id),
+            format!(
+                "id `{}` must be `publisher.name`, lowercase letters/digits/dashes only",
+                m.id
+            ),
             "plugin.json",
         ));
     }
     if !opts.bundled && m.id.split('.').next() == Some(RESERVED_PUBLISHER) {
         report.errors.push(Issue::at(
             codes::ID_RESERVED,
-            format!("the `{}` publisher is reserved for plugins shipped with the app", RESERVED_PUBLISHER),
+            format!(
+                "the `{}` publisher is reserved for plugins shipped with the app",
+                RESERVED_PUBLISHER
+            ),
             "plugin.json",
         ));
     }
@@ -492,11 +515,10 @@ fn check_entry(root: &Path, m: &PluginManifest, report: &mut ValidationReport) {
         }
         Ok(body) => {
             /* Cheap shape check only — the host imports this as an ES module,
-               so a classic script would fail at activation with a confusing
-               error. Catching it here keeps the message actionable. */
-            let has_module_syntax = body.contains("export")
-                || body.contains("import ")
-                || body.contains("import(");
+            so a classic script would fail at activation with a confusing
+            error. Catching it here keeps the message actionable. */
+            let has_module_syntax =
+                body.contains("export") || body.contains("import ") || body.contains("import(");
             if !has_module_syntax {
                 report.warnings.push(Issue::at(
                     codes::ENTRY_NOT_MODULE,
@@ -527,7 +549,10 @@ fn check_contributions(m: &PluginManifest, report: &mut ValidationReport) {
         if !c.id.starts_with(&prefix) {
             report.errors.push(Issue::at(
                 codes::CONTRIBUTION_ID_SHAPE,
-                format!("{} id `{}` must be namespaced under the plugin id (`{}…`)", kind, c.id, prefix),
+                format!(
+                    "{} id `{}` must be namespaced under the plugin id (`{}…`)",
+                    kind, c.id, prefix
+                ),
                 "plugin.json",
             ));
         }
@@ -592,7 +617,9 @@ fn check_icons(root: &Path, m: &PluginManifest, report: &mut ValidationReport) {
                     codes::ICON_UNKNOWN,
                     format!(
                         "{} icon `{}` is not a builtin icon (one of: {})",
-                        owner, name, BUILTIN_ICONS.join(", ")
+                        owner,
+                        name,
+                        BUILTIN_ICONS.join(", ")
                     ),
                     "plugin.json",
                 ));
@@ -603,7 +630,10 @@ fn check_icons(root: &Path, m: &PluginManifest, report: &mut ValidationReport) {
             if !ok {
                 report.errors.push(Issue::at(
                     codes::ICON_MISSING,
-                    format!("{} icon image `{}` is missing or outside the plugin folder", owner, path),
+                    format!(
+                        "{} icon image `{}` is missing or outside the plugin folder",
+                        owner, path
+                    ),
                     path,
                 ));
             }
@@ -702,7 +732,10 @@ pub fn read_manifest_unchecked(root: &Path) -> PluginResult<PluginManifest> {
 
 /// All contribution ids a manifest declares, for the loader's registry.
 pub fn declared_ids(c: &Contributions) -> Vec<(String, String)> {
-    c.all().into_iter().map(|(k, v)| (k.to_string(), v.id.clone())).collect()
+    c.all()
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.id.clone()))
+        .collect()
 }
 
 /// Resolve an asset path for the `plugin://` handler.
@@ -722,8 +755,11 @@ mod tests {
 
     impl Fixture {
         fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("bentomux-validate-{}-{}", tag, std::process::id()));
+            let dir = std::env::temp_dir().join(format!(
+                "bentomux-validate-{}-{}",
+                tag,
+                std::process::id()
+            ));
             fs::remove_dir_all(&dir).ok();
             fs::create_dir_all(&dir).unwrap();
             Fixture { dir }
@@ -773,12 +809,18 @@ mod tests {
     #[test]
     fn valid_plugin_passes_with_no_issues() {
         let f = Fixture::new("ok");
-        f.manifest(GOOD_MANIFEST)
-            .write("index.js", "export function activate(ctx) { ctx.log('hi'); }");
+        f.manifest(GOOD_MANIFEST).write(
+            "index.js",
+            "export function activate(ctx) { ctx.log('hi'); }",
+        );
         let r = f.validate();
         assert!(r.ok, "expected ok, got errors: {:?}", r.errors);
         assert!(r.errors.is_empty());
-        assert!(r.warnings.is_empty(), "unexpected warnings: {:?}", r.warnings);
+        assert!(
+            r.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            r.warnings
+        );
         assert_eq!(r.manifest.unwrap().id, "acme.habit-tracker");
     }
 
@@ -818,13 +860,17 @@ mod tests {
 
         let third_party = f.validate();
         assert!(!third_party.ok);
-        assert!(third_party.errors.iter().any(|i| i.code == codes::ID_RESERVED));
+        assert!(third_party
+            .errors
+            .iter()
+            .any(|i| i.code == codes::ID_RESERVED));
 
-        let bundled = validate_dir_with(
-            &f.dir,
-            &ValidateOptions { bundled: true },
+        let bundled = validate_dir_with(&f.dir, &ValidateOptions { bundled: true });
+        assert!(
+            bundled.ok,
+            "bundled plugins may use the reserved publisher: {:?}",
+            bundled.errors
         );
-        assert!(bundled.ok, "bundled plugins may use the reserved publisher: {:?}", bundled.errors);
     }
 
     #[test]
@@ -840,10 +886,16 @@ mod tests {
     #[test]
     fn command_reference_must_be_declared() {
         let f = Fixture::new("cmdref");
-        f.manifest(&GOOD_MANIFEST.replace("acme.habit-tracker.open\"\n            }]", "acme.habit-tracker.other\"\n            }]"))
-            .write("index.js", "export {}");
+        f.manifest(&GOOD_MANIFEST.replace(
+            "acme.habit-tracker.open\"\n            }]",
+            "acme.habit-tracker.other\"\n            }]",
+        ))
+        .write("index.js", "export {}");
         let r = f.validate();
-        assert!(!r.ok, "a button pointing at an undeclared command must fail");
+        assert!(
+            !r.ok,
+            "a button pointing at an undeclared command must fail"
+        );
         assert!(r.errors.iter().any(|i| i.code == codes::COMMAND_UNDECLARED));
     }
 
@@ -853,14 +905,20 @@ mod tests {
         f.manifest(GOOD_MANIFEST);
         let missing = f.validate();
         assert!(!missing.ok);
-        assert!(missing.errors.iter().any(|i| i.code == codes::ENTRY_MISSING));
+        assert!(missing
+            .errors
+            .iter()
+            .any(|i| i.code == codes::ENTRY_MISSING));
 
         let f2 = Fixture::new("entry2");
         f2.manifest(&GOOD_MANIFEST.replace("index.js", "../escape.js"))
             .write("index.js", "export {}");
         let escape = f2.validate();
         assert!(!escape.ok);
-        assert!(escape.errors.iter().any(|i| i.code == codes::ENTRY_ESCAPES_ROOT));
+        assert!(escape
+            .errors
+            .iter()
+            .any(|i| i.code == codes::ENTRY_ESCAPES_ROOT));
     }
 
     #[test]
@@ -879,7 +937,10 @@ mod tests {
             .write("index.js", "export {}");
         let r = f.validate();
         assert!(!r.ok);
-        assert!(r.errors.iter().any(|i| i.code == codes::API_VERSION_UNKNOWN));
+        assert!(r
+            .errors
+            .iter()
+            .any(|i| i.code == codes::API_VERSION_UNKNOWN));
     }
 
     #[test]
@@ -898,7 +959,10 @@ mod tests {
         .write("index.js", "export {}");
         let r = f.validate();
         assert!(!r.ok);
-        assert!(r.errors.iter().any(|i| i.code == codes::CONTRIBUTION_ID_DUPLICATE));
+        assert!(r
+            .errors
+            .iter()
+            .any(|i| i.code == codes::CONTRIBUTION_ID_DUPLICATE));
     }
 
     #[test]
@@ -976,11 +1040,14 @@ mod tests {
         let json = serde_json::to_value(f.validate()).unwrap();
         assert_eq!(json["ok"], false);
         assert!(json["errors"][0]["code"].is_string());
-        assert!(json["manifest"].is_null(), "absent manifest omits the field");
+        assert!(
+            json["manifest"].is_null(),
+            "absent manifest omits the field"
+        );
     }
 
     /* the authoring loop is the reason this validator exists: one run must
-       report everything wrong, not the first thing the parser tripped over */
+    report everything wrong, not the first thing the parser tripped over */
     #[test]
     fn a_broken_manifest_reports_every_problem_in_one_pass() {
         let f = Fixture::new("multierror");
@@ -999,8 +1066,16 @@ mod tests {
         assert!(!r.ok);
         let codes: Vec<&str> = r.errors.iter().map(|i| i.code.as_str()).collect();
 
-        assert!(codes.contains(&codes::MANIFEST_INVALID), "bad contribution key: {:?}", codes);
-        assert!(codes.contains(&codes::PERMISSION_UNKNOWN), "bad permission: {:?}", codes);
+        assert!(
+            codes.contains(&codes::MANIFEST_INVALID),
+            "bad contribution key: {:?}",
+            codes
+        );
+        assert!(
+            codes.contains(&codes::PERMISSION_UNKNOWN),
+            "bad permission: {:?}",
+            codes
+        );
 
         /* and once the structure parses, the semantic pass still runs */
         let f2 = Fixture::new("multierror2");
@@ -1017,7 +1092,11 @@ mod tests {
         assert!(codes2.contains(&codes::VERSION_INVALID), "{:?}", codes2);
         assert!(codes2.contains(&codes::API_VERSION_UNKNOWN), "{:?}", codes2);
         assert!(codes2.contains(&codes::ENTRY_ESCAPES_ROOT), "{:?}", codes2);
-        assert!(r2.errors.len() >= 4, "one run, four independent problems: {:?}", codes2);
+        assert!(
+            r2.errors.len() >= 4,
+            "one run, four independent problems: {:?}",
+            codes2
+        );
     }
 
     #[test]
@@ -1032,7 +1111,15 @@ mod tests {
         .write("index.js", "export {}");
         let r = f.validate();
         let messages: Vec<&str> = r.errors.iter().map(|i| i.message.as_str()).collect();
-        assert!(messages.iter().any(|m| m.contains("publisher")), "{:?}", messages);
-        assert!(messages.iter().any(|m| m.contains("homepage")), "{:?}", messages);
+        assert!(
+            messages.iter().any(|m| m.contains("publisher")),
+            "{:?}",
+            messages
+        );
+        assert!(
+            messages.iter().any(|m| m.contains("homepage")),
+            "{:?}",
+            messages
+        );
     }
 }

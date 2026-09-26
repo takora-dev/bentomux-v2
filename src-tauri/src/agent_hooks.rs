@@ -1,12 +1,12 @@
 /* ---------------- managed Claude Code hooks ----------------
-   Rust port of src/main/agent-hooks.ts. Installs/removes Bentomux's hook
-   entries in ~/.claude/settings.json so Claude Code forwards
-   PermissionRequest / Notification / Stop events to the bridge. Ownership
-   marker: any command entry whose args reference bentomux-hook.cjs.
-   Foreign hooks are never touched; install is idempotent (stale paths from
-   a previous install are replaced). Deliberately free of any tauri/app
-   dependency so the installer can be unit-tested directly against a temp
-   settings file. */
+Rust port of src/main/agent-hooks.ts. Installs/removes Bentomux's hook
+entries in ~/.claude/settings.json so Claude Code forwards
+PermissionRequest / Notification / Stop events to the bridge. Ownership
+marker: any command entry whose args reference bentomux-hook.cjs.
+Foreign hooks are never touched; install is idempotent (stale paths from
+a previous install are replaced). Deliberately free of any tauri/app
+dependency so the installer can be unit-tested directly against a temp
+settings file. */
 
 use std::collections::HashMap;
 
@@ -18,14 +18,19 @@ pub const MARKER: &str = "bentomux-hook.cjs";
 const LEGACY_MARKER: &str = "takora-hook.cjs";
 
 /* [event, seconds the hook may stay blocked] — PermissionRequest waits
-   for the user's decision and the documented default timeout (600s) is
-   far too short. It is the only managed event: approvals surface in the
-   overlay window alone, so Notification/Stop hooks would be overhead. */
+for the user's decision and the documented default timeout (600s) is
+far too short. It is the only managed event: approvals surface in the
+overlay window alone, so Notification/Stop hooks would be overhead. */
 const MANAGED_EVENTS: &[(&str, u64)] = &[("PermissionRequest", 86400)];
 
 pub fn default_settings_path() -> String {
     dirs::home_dir()
-        .map(|p| p.join(".claude").join("settings.json").to_string_lossy().into_owned())
+        .map(|p| {
+            p.join(".claude")
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned()
+        })
         .unwrap_or_default()
 }
 
@@ -36,7 +41,9 @@ fn is_ours(h: &serde_json::Value) -> bool {
             .and_then(|a| a.as_array())
             .map(|args| {
                 args.iter().any(|a| {
-                    a.as_str().map(|s| s.contains(MARKER) || s.contains(LEGACY_MARKER)).unwrap_or(false)
+                    a.as_str()
+                        .map(|s| s.contains(MARKER) || s.contains(LEGACY_MARKER))
+                        .unwrap_or(false)
                 })
             })
             .unwrap_or(false)
@@ -50,14 +57,17 @@ fn group_is_ours(g: &serde_json::Value) -> bool {
 }
 
 /* distinguish a missing file (fine — install creates it) from one that
-   exists but is not valid JSON (never silently overwrite user settings) */
+exists but is not valid JSON (never silently overwrite user settings) */
 fn load_settings(settings_path: &str) -> (serde_json::Value, Option<String>) {
     if !std::path::Path::new(settings_path).exists() {
         return (serde_json::json!({}), None);
     }
     match read_json::<serde_json::Value>(settings_path) {
         Some(v) if v.is_object() => (v, None),
-        _ => (serde_json::json!({}), Some(format!("Invalid JSON in {settings_path}"))),
+        _ => (
+            serde_json::json!({}),
+            Some(format!("Invalid JSON in {settings_path}")),
+        ),
     }
 }
 
@@ -150,7 +160,7 @@ pub fn uninstall_hooks(settings_path: &str) -> AgentHooksStatus {
 }
 
 /* keyed test helpers — expose the raw mutated hooks map so tests need not
-   fabricate the whole AgentHooksStatus */
+fabricate the whole AgentHooksStatus */
 pub fn hook_events_present(settings_path: &str) -> HashMap<String, bool> {
     let (obj, _) = load_settings(settings_path);
     let mut out = HashMap::new();
@@ -172,7 +182,10 @@ mod tests {
 
     fn temp_settings(suffix: &str) -> String {
         std::env::temp_dir()
-            .join(format!("bentomux-hook-test-{}-{suffix}.json", std::process::id()))
+            .join(format!(
+                "bentomux-hook-test-{}-{suffix}.json",
+                std::process::id()
+            ))
             .to_string_lossy()
             .into_owned()
     }
@@ -198,7 +211,10 @@ mod tests {
         let st = install_hooks(&p, "/tmp/bentomux-hook.cjs");
         assert!(st.installed, "hooks should install: {st:?}");
         assert!(st.error.is_none());
-        assert!(hook_events_present(&p).get("PermissionRequest").copied().unwrap_or(false));
+        assert!(hook_events_present(&p)
+            .get("PermissionRequest")
+            .copied()
+            .unwrap_or(false));
 
         /* install again is idempotent — exactly one of our groups */
         install_hooks(&p, "/tmp/bentomux-hook.cjs");
@@ -211,7 +227,10 @@ mod tests {
 
         let un = uninstall_hooks(&p);
         assert!(!un.installed);
-        assert!(!hook_events_present(&p).get("PermissionRequest").copied().unwrap_or(false));
+        assert!(!hook_events_present(&p)
+            .get("PermissionRequest")
+            .copied()
+            .unwrap_or(false));
         clean(&p);
     }
 

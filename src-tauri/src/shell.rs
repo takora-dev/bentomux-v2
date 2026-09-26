@@ -1,7 +1,7 @@
 /* ---------------- default shell detection ----------------
-   Rust port of src/main/shell-detect.ts + path-lookup.ts.
-   Windows: pwsh → powershell → cmd, found by scanning PATH × PATHEXT
-   (never spawns where.exe). Unix: bash → zsh → fish → /bin/sh. */
+Rust port of src/main/shell-detect.ts + path-lookup.ts.
+Windows: pwsh → powershell → cmd, found by scanning PATH × PATHEXT
+(never spawns where.exe). Unix: bash → zsh → fish → /bin/sh. */
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -18,12 +18,12 @@ pub struct ShellChoice {
 pub type ShellPref = str; /* "system" | "powershell" | "cmd" | "gitbash" | "wsl" */
 
 /* ---------------- PATH lookup without spawning where.exe ----------------
-   where.exe reports misses through the Windows console API, which leaks
-   into the terminal even when stdio is piped, and every spawn synchronously
-   blocks the main process. Scanning PATH × PATHEXT on the filesystem answers
-   the same question for the CLI tools Bentomux detects. Results are cached
-   briefly so repeated detections cost nothing while still noticing newly
-   installed tools. */
+where.exe reports misses through the Windows console API, which leaks
+into the terminal even when stdio is piped, and every spawn synchronously
+blocks the main process. Scanning PATH × PATHEXT on the filesystem answers
+the same question for the CLI tools Bentomux detects. Results are cached
+briefly so repeated detections cost nothing while still noticing newly
+installed tools. */
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
@@ -68,8 +68,8 @@ fn path_dirs() -> Vec<String> {
         .filter(|d| !d.is_empty())
         .collect();
     /* a GUI-launched app inherits launchd's minimal PATH, so the homebrew /
-       /usr/local installs the "not found on PATH" message points at are
-       otherwise invisible */
+    /usr/local installs the "not found on PATH" message points at are
+    otherwise invisible */
     for extra in ["/usr/local/bin", "/opt/homebrew/bin"] {
         if !dirs.iter().any(|d| d == extra) {
             dirs.push(extra.to_string());
@@ -88,15 +88,22 @@ fn path_files() -> HashMap<String, PathBuf> {
     }
     let mut files = HashMap::new();
     for dir in path_dirs() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             if let Ok(name) = entry.file_name().into_string() {
                 let key = name.to_lowercase();
-                files.entry(key).or_insert_with(|| PathBuf::from(&dir).join(&name));
+                files
+                    .entry(key)
+                    .or_insert_with(|| PathBuf::from(&dir).join(&name));
             }
         }
     }
-    *path_cache().lock().unwrap() = Some(PathCache { at: Instant::now(), files: files.clone() });
+    *path_cache().lock().unwrap() = Some(PathCache {
+        at: Instant::now(),
+        files: files.clone(),
+    });
     files
 }
 
@@ -109,20 +116,29 @@ fn path_files() -> HashMap<String, PathBuf> {
     }
     let mut files = HashMap::new();
     for dir in path_dirs() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
-            let Ok(name) = entry.file_name().into_string() else { continue };
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
             /* only executables count as shell/tool candidates on unix */
             let is_exec = entry
                 .metadata()
                 .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
                 .unwrap_or(false);
             if is_exec {
-                files.entry(name.to_lowercase()).or_insert_with(|| PathBuf::from(&dir).join(&name));
+                files
+                    .entry(name.to_lowercase())
+                    .or_insert_with(|| PathBuf::from(&dir).join(&name));
             }
         }
     }
-    *path_cache().lock().unwrap() = Some(PathCache { at: Instant::now(), files: files.clone() });
+    *path_cache().lock().unwrap() = Some(PathCache {
+        at: Instant::now(),
+        files: files.clone(),
+    });
     files
 }
 
@@ -136,7 +152,9 @@ pub fn find_on_path(name: &str) -> Option<String> {
             .map(|i| name[i + 1..].chars().all(|c| c.is_ascii_alphanumeric()))
             .unwrap_or(false);
         if has_ext {
-            return files.get(&name.to_lowercase()).map(|p| p.to_string_lossy().into_owned());
+            return files
+                .get(&name.to_lowercase())
+                .map(|p| p.to_string_lossy().into_owned());
         }
         for ext in path_exts() {
             let key = format!("{}{}", name, ext).to_lowercase();
@@ -148,7 +166,9 @@ pub fn find_on_path(name: &str) -> Option<String> {
     }
     #[cfg(unix)]
     {
-        files.get(&name.to_lowercase()).map(|p| p.to_string_lossy().into_owned())
+        files
+            .get(&name.to_lowercase())
+            .map(|p| p.to_string_lossy().into_owned())
     }
 }
 
@@ -191,15 +211,24 @@ fn detect_shell_uncached() -> ShellChoice {
     if let Ok(shell_env) = std::env::var("SHELL") {
         let path = std::path::PathBuf::from(&shell_env);
         if path.exists() {
-            return ShellChoice { file: shell_env, args: vec!["-l".to_string()] };
+            return ShellChoice {
+                file: shell_env,
+                args: vec!["-l".to_string()],
+            };
         }
     }
     for name in ["zsh", "bash", "fish"] {
         if let Some(found) = find_on_path(name) {
-            return ShellChoice { file: found, args: vec!["-l".to_string()] };
+            return ShellChoice {
+                file: found,
+                args: vec!["-l".to_string()],
+            };
         }
     }
-    ShellChoice { file: "/bin/sh".to_string(), args: vec![] }
+    ShellChoice {
+        file: "/bin/sh".to_string(),
+        args: vec![],
+    }
 }
 
 /* common Git-for-Windows install roots, most likely first */
@@ -224,18 +253,24 @@ fn git_bash_candidates() -> Vec<String> {
 }
 
 /* the shell a new pane should spawn with, honoring the user's settings pick.
-   `pref` is one of: "system" | "powershell" | "cmd" | "gitbash" | "wsl". */
+`pref` is one of: "system" | "powershell" | "cmd" | "gitbash" | "wsl". */
 pub fn resolve_shell(pref: Option<&str>) -> ShellChoice {
     match pref {
         None | Some("system") => detect_shell(),
         #[cfg(windows)]
         Some("powershell") => match find_on_path("powershell.exe") {
-            Some(found) => ShellChoice { file: found, args: vec!["-NoLogo".to_string()] },
+            Some(found) => ShellChoice {
+                file: found,
+                args: vec!["-NoLogo".to_string()],
+            },
             None => detect_shell(),
         },
         #[cfg(unix)]
         Some("powershell") => match find_on_path("pwsh") {
-            Some(found) => ShellChoice { file: found, args: vec!["-NoLogo".to_string()] },
+            Some(found) => ShellChoice {
+                file: found,
+                args: vec!["-NoLogo".to_string()],
+            },
             None => detect_shell(),
         },
         #[cfg(windows)]
@@ -246,8 +281,14 @@ pub fn resolve_shell(pref: Option<&str>) -> ShellChoice {
             args: vec![],
         },
         #[cfg(windows)]
-        Some("gitbash") => match git_bash_candidates().into_iter().find(|p| PathBuf::from(p).exists()) {
-            Some(bash) => ShellChoice { file: bash, args: vec!["-i".to_string(), "-l".to_string()] },
+        Some("gitbash") => match git_bash_candidates()
+            .into_iter()
+            .find(|p| PathBuf::from(p).exists())
+        {
+            Some(bash) => ShellChoice {
+                file: bash,
+                args: vec!["-i".to_string(), "-l".to_string()],
+            },
             None => detect_shell(),
         },
         #[cfg(windows)]
@@ -257,27 +298,39 @@ pub fn resolve_shell(pref: Option<&str>) -> ShellChoice {
         },
         #[cfg(unix)]
         Some("zsh") => match find_on_path("zsh") {
-            Some(found) => ShellChoice { file: found, args: vec!["-l".to_string()] },
+            Some(found) => ShellChoice {
+                file: found,
+                args: vec!["-l".to_string()],
+            },
             None => detect_shell(),
         },
         #[cfg(unix)]
         Some("bash") => match find_on_path("bash") {
-            Some(found) => ShellChoice { file: found, args: vec!["-l".to_string()] },
+            Some(found) => ShellChoice {
+                file: found,
+                args: vec!["-l".to_string()],
+            },
             None => detect_shell(),
         },
         #[cfg(unix)]
         Some("fish") => match find_on_path("fish") {
-            Some(found) => ShellChoice { file: found, args: vec![] },
+            Some(found) => ShellChoice {
+                file: found,
+                args: vec![],
+            },
             None => detect_shell(),
         },
         #[cfg(unix)]
         Some("pi") => match find_on_path("pi") {
-            Some(found) => ShellChoice { file: found, args: vec![] },
+            Some(found) => ShellChoice {
+                file: found,
+                args: vec![],
+            },
             None => detect_shell(),
         },
         /* platform-specific picks that don't exist on this OS (or unknown
-           prefs entirely): fall back to the detected default rather than
-           spawning a nonexistent binary */
+        prefs entirely): fall back to the detected default rather than
+        spawning a nonexistent binary */
         Some(_) => detect_shell(),
     }
 }
@@ -289,7 +342,9 @@ mod tests {
     #[test]
     fn test_find_on_path_finds_common_tool() {
         /* sh/bash/zsh exist on every dev machine this suite runs on */
-        let hit = find_on_path("sh").or_else(|| find_on_path("bash")).or_else(|| find_on_path("zsh"));
+        let hit = find_on_path("sh")
+            .or_else(|| find_on_path("bash"))
+            .or_else(|| find_on_path("zsh"));
         assert!(hit.is_some(), "expected a shell on PATH");
         let hit = hit.unwrap();
         assert!(PathBuf::from(&hit).exists());
@@ -301,7 +356,7 @@ mod tests {
     }
 
     /* packaged apps launched from Finder/Dock inherit launchd's minimal PATH;
-       the standard unix install dirs must still be scanned */
+    the standard unix install dirs must still be scanned */
     #[cfg(unix)]
     #[test]
     fn test_path_dirs_includes_standard_install_dirs() {
@@ -325,9 +380,21 @@ mod tests {
 
     #[test]
     fn test_resolve_shell_honors_prefs() {
-        for pref in [None, Some("system"), Some("powershell"), Some("cmd"), Some("gitbash"), Some("wsl")] {
+        for pref in [
+            None,
+            Some("system"),
+            Some("powershell"),
+            Some("cmd"),
+            Some("gitbash"),
+            Some("wsl"),
+        ] {
             let shell = resolve_shell(pref);
-            assert!(PathBuf::from(&shell.file).exists(), "pref {:?} → {}", pref, shell.file);
+            assert!(
+                PathBuf::from(&shell.file).exists(),
+                "pref {:?} → {}",
+                pref,
+                shell.file
+            );
         }
     }
 }

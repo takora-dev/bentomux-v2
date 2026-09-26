@@ -1,6 +1,6 @@
 /* ---------------- agent adapter contract ----------------
-   Rust port of src/main/agents/types.ts. This is the surface each agent
-   runtime adapter implements; the registry in index.rs holds one per agent. */
+Rust port of src/main/agents/types.ts. This is the surface each agent
+runtime adapter implements; the registry in index.rs holds one per agent. */
 
 use std::collections::HashMap;
 
@@ -57,8 +57,8 @@ pub struct AdapterCtx {
 }
 
 /* the Model-tab surface an adapter may expose. Fields outside `fields` are
-   not rendered; an empty-string patch value clears the field, except apiKey
-   which arrives only when the user typed a new one (null = clear). */
+not rendered; an empty-string patch value clears the field, except apiKey
+which arrives only when the user typed a new one (null = clear). */
 pub struct ModelSettingsCap {
     pub fields: Vec<ModelField>,
     /* fixed choices for the format field; empty = free-text input */
@@ -80,9 +80,9 @@ pub trait AgentAdapter: Send + Sync {
     fn write(&self, kind: ResourceKind, id: String, name: String, def: ResourceDef);
     fn remove(&self, kind: ResourceKind, id: String, def: Option<&ResourceDef>);
     /* native enable/disable in the agent's own config (e.g. Claude
-       skillOverrides); when absent the orchestrator falls back to the shadow
-       store. has_native_toggle defaults false and is overridden by adapters
-       that implement native_toggle. */
+    skillOverrides); when absent the orchestrator falls back to the shadow
+    store. has_native_toggle defaults false and is overridden by adapters
+    that implement native_toggle. */
     fn has_native_toggle(&self) -> bool {
         false
     }
