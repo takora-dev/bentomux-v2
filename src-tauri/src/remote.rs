@@ -1046,16 +1046,33 @@ fn tunnel_error() -> &'static Mutex<Option<String>> {
     TUNNEL_ERROR.get_or_init(|| Mutex::new(None))
 }
 
+/* A quick-tunnel hostname stops resolving the moment its cloudflared exits,
+so a tunnel that died must not keep handing out a URL — and must not keep
+`start_tunnel`'s guard closed either, or the app can never replace it. Poll
+the child: alive keeps everything, exited drops the state. A poll error
+counts as alive so a tunnel we cannot inspect is never dropped — a wrongly
+reaped one would leave a running cloudflared behind that nobody holds.
+Split out from `tunnel_running` so the rule is testable. */
+fn reap_and_alive(g: &mut Option<TunnelState>) -> bool {
+    let alive = g
+        .as_mut()
+        .is_some_and(|t| t.child.try_wait().ok().flatten().is_none());
+    if !alive {
+        *g = None;
+    }
+    alive
+}
+
 pub fn tunnel_url() -> Option<String> {
-    tunnel()
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(|t| t.url.lock().unwrap().clone())
+    let mut g = tunnel().lock().unwrap();
+    if !reap_and_alive(&mut g) {
+        return None;
+    }
+    g.as_ref().and_then(|t| t.url.lock().unwrap().clone())
 }
 
 pub fn tunnel_running() -> bool {
-    tunnel().lock().unwrap().is_some()
+    reap_and_alive(&mut tunnel().lock().unwrap())
 }
 
 /* scrapes a `https://...trycloudflare.com` URL out of a cloudflared log line */
@@ -1480,6 +1497,33 @@ pub fn restore_on_startup(app: &tauri::AppHandle, state: &AppStateManager) {
     }
 }
 
+/* Nothing replaces a tunnel that dies on its own: cloudflared gives up when
+the network changes, when the laptop sleeps, and on its own crashes, while
+`prefs.remote.enabled` stays true — so the app keeps advertising a hostname
+that no longer resolves and the phone cannot even load the page to be told
+so. Poll and put a fresh one up. ponytail: one fixed 15s tick, no backoff,
+so a tunnel that cannot be established at all is respawned every 15s; add a
+failure counter if that ever shows up in practice. */
+pub fn spawn_tunnel_watchdog(app: &tauri::AppHandle) {
+    const TUNNEL_WATCH_SECS: u64 = 15;
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(TUNNEL_WATCH_SECS));
+        loop {
+            tick.tick().await;
+            let state = app.state::<AppStateManager>();
+            // the local server is the tunnel's upstream: restarting the
+            // tunnel while it is down just churns hostnames for nothing
+            if !remote_enabled(&state.get_state().prefs) || !remote_running() {
+                continue;
+            }
+            if !tunnel_running() {
+                start_tunnel(&app, remote_port(&state.get_state().prefs));
+            }
+        }
+    });
+}
+
 pub fn set_remote_port(
     app: &tauri::AppHandle,
     state: &AppStateManager,
@@ -1552,6 +1596,39 @@ mod tests {
         );
         assert_eq!(orphan_tunnel_pid("garbage", target), None);
         assert_eq!(orphan_tunnel_pid("", target), None);
+    }
+
+    /* a child that exits right away, so its polls report it as gone */
+    fn exited_child() -> std::process::Child {
+        #[cfg(windows)]
+        let mut c = std::process::Command::new("cmd");
+        #[cfg(not(windows))]
+        let mut c = std::process::Command::new("sh");
+        #[cfg(windows)]
+        c.args(["/C", "exit"]);
+        #[cfg(not(windows))]
+        c.args(["-c", "exit 0"]);
+        c.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_tunnel_whose_process_died_is_forgotten_so_the_next_start_can_replace_it() {
+        let mut child = exited_child();
+        child.wait().unwrap(); // polled before it exits, this would race
+        let mut g = Some(TunnelState {
+            child,
+            url: Arc::new(Mutex::new(Some(
+                "https://logan-section-yorkshire-petite.trycloudflare.com".to_string(),
+            ))),
+        });
+        assert!(!reap_and_alive(&mut g), "a dead cloudflared is not running");
+        assert!(
+            g.is_none(),
+            "a dead child must not keep start_tunnel's guard closed"
+        );
     }
 
     #[test]

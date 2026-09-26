@@ -90,6 +90,8 @@ pub fn run() {
         call when prefs.remote.enabled was persisted true from a prior
         session — otherwise the panel shows "On" but never actually starts. */
         remote::restore_on_startup(&handle, app.state::<state::AppStateManager>().inner());
+        /* keeps a public tunnel up when cloudflared exits on its own */
+        remote::spawn_tunnel_watchdog(&handle);
         /* agent runtime detection: headless screen feed + process poller */
         runtime::init(handle.clone());
         /* approval bridge: unix socket the managed agent hooks write to */
