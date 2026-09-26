@@ -1,18 +1,18 @@
 /* ---------------- remote control (phone browser) ----------------
-   Rust port of src/main/remote.ts. HTTPS-only: the local server binds
-   loopback and is reachable solely through the bundled cloudflared
-   quick tunnel, whose public https://trycloudflare.com URL (token-
-   embedded) is the pairing QR shown in Settings. Every route (page and
-   WS) requires the pairing token from prefs.remote.token — the token
-   now grants FULL CONTROL (watch, switch panes, type into the watched
-   pane, approve/deny), so treat a leaked URL as shell access. Screen
-   text comes from the headless render in detect/screen.rs (plain text,
-   escape sequences consumed); watched panes are re-serialized on a
-   fixed tick while their output is moving. Remote decisions go through
-   the same resolve_approval() the local overlay uses, so every surface
-   closes via agent:approvalClosed. */
+Rust port of src/main/remote.ts. HTTPS-only: the local server binds
+loopback and is reachable solely through the bundled cloudflared
+quick tunnel, whose public https://trycloudflare.com URL (token-
+embedded) is the pairing QR shown in Settings. Every route (page and
+WS) requires the pairing token from prefs.remote.token — the token
+now grants FULL CONTROL (watch, switch panes, type into the watched
+pane, approve/deny), so treat a leaked URL as shell access. Screen
+text comes from the headless render in detect/screen.rs (plain text,
+escape sequences consumed); watched panes are re-serialized on a
+fixed tick while their output is moving. Remote decisions go through
+the same resolve_approval() the local overlay uses, so every surface
+closes via agent:approvalClosed. */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -35,20 +35,21 @@ use crate::state::{AppStateManager, RemotePrefs};
 pub const DEFAULT_REMOTE_PORT: u16 = 8765;
 
 /* watched panes re-serialize at most this often, and only while output
-   is actually moving */
+is actually moving */
 const WATCH_TICK_MS: u64 = 250;
 
 /* The pairing token in the QR is exchanged once for an HttpOnly cookie and
-   never used as a session: it stays out of browser history, Referer headers,
-   and any proxy log that records query strings. */
+never used as a session: it stays out of browser history, Referer headers,
+and any proxy log that records query strings. */
 const SESSION_COOKIE: &str = "bentomux_session";
 const SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 const MAX_SESSIONS: usize = 32;
 
-/* bounds on what a single socket may send, and how fast */
+/* the bounds a single socket may send, and how fast */
 const MAX_WS_MESSAGE: usize = 64 * 1024;
 const MAX_WRITE_BYTES: usize = 8 * 1024;
 const MAX_INBOUND_PER_SEC: u32 = 200;
+
 /* pairing-token guesses allowed per minute across all connections */
 const MAX_AUTH_PER_MIN: u32 = 30;
 
@@ -85,8 +86,14 @@ pub struct RemotePairing {
 enum RemoteMsg {
     /* already-serialized JSON: hello / panes / status / approval / approvalClosed */
     Json(String),
-    View { pane_id: String, text: String, html: String },
-    Gone { pane_id: String },
+    View {
+        pane_id: String,
+        text: String,
+        html: String,
+    },
+    Gone {
+        pane_id: String,
+    },
 }
 
 fn js(v: &impl Serialize) -> String {
@@ -94,7 +101,7 @@ fn js(v: &impl Serialize) -> String {
 }
 
 /* live server handle; None while stopped. LAST_ERROR remembers the most
-   recent bind failure so the Settings surface can show it. */
+recent bind failure so the Settings surface can show it. */
 struct ServerState {
     kill_tx: tokio::sync::watch::Sender<bool>,
     running: Arc<AtomicBool>,
@@ -111,7 +118,7 @@ fn last_error() -> &'static Mutex<Option<String>> {
 }
 
 /* feed callbacks registered once reuse the CURRENT_OUT channel each start,
-   so a restart never double-registers or writes into a dead channel. */
+so a restart never double-registers or writes into a dead channel. */
 static CURRENT_OUT: std::sync::OnceLock<Mutex<Option<tokio::sync::broadcast::Sender<RemoteMsg>>>> =
     std::sync::OnceLock::new();
 fn current_out() -> &'static Mutex<Option<tokio::sync::broadcast::Sender<RemoteMsg>>> {
@@ -125,11 +132,19 @@ pub fn remote_running() -> bool {
 }
 
 fn remote_port(prefs: &crate::state::Prefs) -> u16 {
-    prefs.remote.as_ref().and_then(|r| r.port).unwrap_or(DEFAULT_REMOTE_PORT)
+    prefs
+        .remote
+        .as_ref()
+        .and_then(|r| r.port)
+        .unwrap_or(DEFAULT_REMOTE_PORT)
 }
 
 fn remote_enabled(prefs: &crate::state::Prefs) -> bool {
-    prefs.remote.as_ref().and_then(|r| r.enabled).unwrap_or(false)
+    prefs
+        .remote
+        .as_ref()
+        .and_then(|r| r.enabled)
+        .unwrap_or(false)
 }
 
 /* generated on first use so paired devices survive restarts */
@@ -193,6 +208,17 @@ const PAGE_FALLBACK: &str = "<!doctype html><meta charset=utf-8><title>Bentomux 
 <h1>Bentomux remote</h1><p>Pairing page not found (remote-page.html resource missing).</p>";
 
 fn remote_page_html(app: &tauri::AppHandle) -> String {
+    /* `tauri dev` copies resources/ into target/<profile>/_up_/resources/ at
+    build time and the copy is what the phone gets, so an edit to the page
+    would sit invisible until a cargo rebuild. The source file wins when the
+    debug build can still see it; a release bundle only has the copy. */
+    if cfg!(debug_assertions) {
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Ok(html) = std::fs::read_to_string(cwd.join("../resources/remote-page.html")) {
+                return html;
+            }
+        }
+    }
     app.path()
         .resolve("../resources/remote-page.html", BaseDirectory::Resource)
         .ok()
@@ -213,16 +239,19 @@ struct WsCtx {
 /* ---------------- auth: cookie sessions + rate limits ---------------- */
 
 /* byte-wise compare; the token length is fixed and public, the bytes are what
-   must not be guessable one byte at a time */
+must not be guessable one byte at a time */
 fn ct_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.bytes()
+        .zip(b.bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 /* fixed-window counter: no dependency, and enough to stop a leaked URL from
-   hammering the socket or grinding the pairing token */
+hammering the socket or grinding the pairing token */
 struct RateLimit {
     start: Instant,
     count: u32,
@@ -232,7 +261,12 @@ struct RateLimit {
 
 impl RateLimit {
     fn new(max: u32, window: Duration) -> Self {
-        Self { start: Instant::now(), count: 0, max, window }
+        Self {
+            start: Instant::now(),
+            count: 0,
+            max,
+            window,
+        }
     }
 
     fn allow(&mut self) -> bool {
@@ -257,7 +291,7 @@ fn auth_allowed() -> bool {
 }
 
 /* live browser sessions. Capped and expired so a long-running app cannot
-   accumulate them; every use slides the expiry forward. */
+accumulate them; every use slides the expiry forward. */
 #[derive(Default)]
 struct Sessions {
     map: Mutex<HashMap<String, Instant>>,
@@ -269,7 +303,13 @@ impl Sessions {
         let now = Instant::now();
         map.retain(|_, seen| now.duration_since(*seen) < SESSION_TTL);
         while map.len() >= MAX_SESSIONS {
-            let Some(oldest) = map.iter().min_by_key(|(_, seen)| **seen).map(|(id, _)| id.clone()) else { break };
+            let Some(oldest) = map
+                .iter()
+                .min_by_key(|(_, seen)| **seen)
+                .map(|(id, _)| id.clone())
+            else {
+                break;
+            };
             map.remove(&oldest);
         }
         let id = random_token();
@@ -281,7 +321,9 @@ impl Sessions {
         let mut map = self.map.lock().unwrap();
         let now = Instant::now();
         map.retain(|_, seen| now.duration_since(*seen) < SESSION_TTL);
-        let Some(seen) = map.get_mut(id) else { return false };
+        let Some(seen) = map.get_mut(id) else {
+            return false;
+        };
         *seen = now;
         true
     }
@@ -311,7 +353,7 @@ fn session_cookie(id: &str, secure: bool) -> String {
 }
 
 /* one response for every auth failure: no oracle telling a guesser whether
-   the token existed, only whether it was right */
+the token existed, only whether it was right */
 fn auth_failed() -> axum::response::Response {
     (
         axum::http::StatusCode::UNAUTHORIZED,
@@ -341,7 +383,9 @@ mod ws_auth_regression {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
             axum::http::header::COOKIE,
-            "theme=dark; bentomux_session=sid-1; other=1".parse().unwrap(),
+            "theme=dark; bentomux_session=sid-1; other=1"
+                .parse()
+                .unwrap(),
         );
         assert_eq!(session_from_cookie(&headers).as_deref(), Some("sid-1"));
         assert_eq!(session_from_cookie(&axum::http::HeaderMap::new()), None);
@@ -353,11 +397,10 @@ mod ws_auth_regression {
         assert!(!sessions.valid("nope"));
         let id = sessions.create();
         assert!(sessions.valid(&id));
-        sessions
-            .map
-            .lock()
-            .unwrap()
-            .insert(id.clone(), Instant::now() - SESSION_TTL - Duration::from_secs(1));
+        sessions.map.lock().unwrap().insert(
+            id.clone(),
+            Instant::now() - SESSION_TTL - Duration::from_secs(1),
+        );
         assert!(!sessions.valid(&id));
     }
 
@@ -380,8 +423,8 @@ mod ws_auth_regression {
 }
 
 /* The pairing URL carries the token exactly once. It is traded here for an
-   HttpOnly session cookie and the browser is redirected to the bare path, so
-   the token leaves the address bar before the page even renders. */
+HttpOnly session cookie and the browser is redirected to the bare path, so
+the token leaves the address bar before the page even renders. */
 async fn handle_page(
     AxState(st): AxState<WsCtx>,
     headers: axum::http::HeaderMap,
@@ -392,35 +435,54 @@ async fn handle_page(
             return auth_failed();
         }
         /* cloudflared terminates TLS and says so; a direct loopback hit is
-           plain HTTP, where a Secure cookie would simply be dropped */
-        let secure = headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok()) == Some("https");
+        plain HTTP, where a Secure cookie would simply be dropped */
+        let secure = headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            == Some("https");
         let mut res = axum::http::HeaderMap::new();
         res.insert(axum::http::header::LOCATION, "/".parse().unwrap());
         res.insert(
             axum::http::header::SET_COOKIE,
-            session_cookie(&st.sessions.create(), secure).parse().unwrap(),
+            session_cookie(&st.sessions.create(), secure)
+                .parse()
+                .unwrap(),
         );
         return (axum::http::StatusCode::SEE_OTHER, res).into_response();
     }
-    if !st.sessions.valid(&session_from_cookie(&headers).unwrap_or_default()) {
+    if !st
+        .sessions
+        .valid(&session_from_cookie(&headers).unwrap_or_default())
+    {
         return auth_failed();
     }
     (
         axum::http::StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            /* the page is the app: a phone holding a cached copy after an
+            update shows a UI that no longer matches the server */
+            (
+                axum::http::header::CACHE_CONTROL,
+                "no-store, must-revalidate",
+            ),
+        ],
         remote_page_html(&st.app),
     )
         .into_response()
 }
 
 /* the pairing token is never accepted here: a socket has to present the
-   session cookie the page exchange issued */
+session cookie the page exchange issued */
 async fn handle_ws(
     ws: WebSocketUpgrade,
     AxState(st): AxState<WsCtx>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    if !st.sessions.valid(&session_from_cookie(&headers).unwrap_or_default()) {
+    if !st
+        .sessions
+        .valid(&session_from_cookie(&headers).unwrap_or_default())
+    {
         return auth_failed();
     }
     ws.max_message_size(MAX_WS_MESSAGE)
@@ -436,16 +498,32 @@ async fn send_json(sender: &mut SplitSink<WebSocket, Message>, body: String) -> 
 async fn client_loop(ws: WebSocket, st: WsCtx) {
     use futures_util::StreamExt;
     let (mut sender, mut receiver) = ws.split();
-    let pane_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    /* the panes this phone has open. One socket can hold more than one: a
+    desktop with two panes split shows both on the phone, and the set is
+    what keeps the counts, the per-pane filters and the writes aligned. */
+    let watching: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     let mut out_rx = st.out.subscribe();
     /* a phone types in bursts, not floods: anything past this is dropped with
-       the connection rather than forwarded into a shell */
+    the connection rather than forwarded into a shell */
     let mut inbound_limit = RateLimit::new(MAX_INBOUND_PER_SEC, Duration::from_secs(1));
+    /* cloudflared reaps a connection that carries no bytes for ~100 s, and
+    the pane list sits quiet for minutes at a time: ping on our own clock
+    so an idle phone screen does not wake up to a dead socket */
+    let mut keepalive = tokio::time::interval(Duration::from_secs(25));
+    keepalive.tick().await;
 
     /* everything a fresh client needs: identity, current state */
     send_json(&mut sender, js(&json!({"t": "hello"}))).await;
-    send_json(&mut sender, js(&json!({"t": "panes", "panes": pane_list(&st.app)}))).await;
-    send_json(&mut sender, js(&json!({"t": "status", "statuses": crate::runtime::latest_runtime_statuses()}))).await;
+    send_json(
+        &mut sender,
+        js(&json!({"t": "panes", "panes": pane_list(&st.app)})),
+    )
+    .await;
+    send_json(
+        &mut sender,
+        js(&json!({"t": "status", "statuses": crate::runtime::latest_runtime_statuses()})),
+    )
+    .await;
     for req in crate::bridge::pending_approvals() {
         send_json(&mut sender, js(&json!({"t": "approval", "req": req}))).await;
     }
@@ -460,7 +538,7 @@ async fn client_loop(ws: WebSocket, st: WsCtx) {
                         if !inbound_limit.allow() {
                             break;
                         }
-                        handle_incoming(text, &pane_id, &mut sender, &st.app).await
+                        handle_incoming(text, &watching, &mut sender, &st.app).await
                     }
                     Message::Close(_) => break,
                     _ => {}
@@ -469,13 +547,13 @@ async fn client_loop(ws: WebSocket, st: WsCtx) {
             out = out_rx.recv() => {
                 match out {
                     Ok(RemoteMsg::View { pane_id: p, text, html }) => {
-                        if pane_id.lock().unwrap().as_deref() == Some(p.as_str()) {
+                        if watching.lock().unwrap().contains(&p) {
                             if !send_json(&mut sender, js(&json!({"t": "view", "paneId": p, "text": text, "html": html}))).await { break; }
                         }
                     }
                     Ok(RemoteMsg::Gone { pane_id: p }) => {
-                        if pane_id.lock().unwrap().as_deref() == Some(p.as_str()) {
-                            *pane_id.lock().unwrap() = None;
+                        if watching.lock().unwrap().remove(&p) {
+                            unwatch(&p);
                             if !send_json(&mut sender, js(&json!({"t": "gone", "paneId": p}))).await { break; }
                         }
                     }
@@ -486,12 +564,20 @@ async fn client_loop(ws: WebSocket, st: WsCtx) {
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
+            _ = keepalive.tick() => {
+                if sender.send(Message::Ping(Vec::new())).await.is_err() { break; }
+            }
         }
+    }
+    /* a dropped socket must not leave its watches behind, or the tick keeps
+    re-serializing panes nobody is looking at */
+    for p in watching.lock().unwrap().iter() {
+        unwatch(p);
     }
 }
 
 /* ids of panes that currently exist and are alive; a remote client may only
-   watch or type into one of these */
+watch or type into one of these */
 fn live_panes(app: &tauri::AppHandle) -> Vec<String> {
     app.state::<crate::pty::PtyManager>()
         .live_terms()
@@ -501,11 +587,11 @@ fn live_panes(app: &tauri::AppHandle) -> Vec<String> {
 }
 
 /* strict wire messages from the phone; anything malformed is ignored.
-   "write" is full control — it types into the pane this connection is
-   currently watching. */
+"write" is full control — it types into the pane this connection is
+currently watching. */
 async fn handle_incoming(
     text: String,
-    pane_id: &Arc<Mutex<Option<String>>>,
+    watching: &Arc<Mutex<HashSet<String>>>,
     sender: &mut SplitSink<WebSocket, Message>,
     app: &tauri::AppHandle,
 ) {
@@ -520,14 +606,20 @@ async fn handle_incoming(
                 if !live_panes(app).iter().any(|id| id == pid) {
                     return;
                 }
-                *pane_id.lock().unwrap() = Some(pid.to_string());
-                /* on-demand html render: the tick path is text-only, so a
-                   fresh watch renders full html once here. Empty cache
-                   (stale daemon, raced attach) falls back to a direct
-                   daemon read instead of sending a blank view.
-                   snapshot_html waits on the daemon for up to
-                   REQUEST_TIMEOUT, so it runs on the blocking pool: a
-                   stalled daemon must not tie up a runtime worker. */
+                /* adding to the set, not replacing it: the phone mirrors
+                every pane it shows, and re-watching the same pane must not
+                double its count */
+                if watching.lock().unwrap().insert(pid.to_string()) {
+                    watch(pid);
+                }
+                /* on-demand html render so the very first frame is colored.
+                The tick renders too (see push_dirty), but only once output
+                moves — an idle pane would otherwise stay blank here. An
+                empty cache (stale daemon, raced attach) falls back to a
+                direct daemon read instead of sending a blank view.
+                snapshot_html waits on the daemon for up to
+                REQUEST_TIMEOUT, so it runs on the blocking pool: a
+                stalled daemon must not tie up a runtime worker. */
                 let pid_owned = pid.to_string();
                 let app_owned = app.clone();
                 let snap = tauri::async_runtime::spawn_blocking(move || {
@@ -540,7 +632,7 @@ async fn handle_incoming(
                 .flatten();
                 let (text, html) = match snap {
                     /* fresh full render wins: cache can hold a text-only tick
-                       snapshot whose html is still empty */
+                    snapshot whose html is still empty */
                     Some(s) if !s.html.is_empty() => {
                         crate::detect::screen::update_snapshot(pid, s.clone());
                         (s.text, s.html)
@@ -555,19 +647,36 @@ async fn handle_incoming(
             }
         }
         Some("unwatch") => {
-            *pane_id.lock().unwrap() = None;
+            /* with a paneId it releases just that one, so a pane closing on
+            the desktop (or leaving the phone's grid) leaves the rest live;
+            without one it releases everything this socket holds */
+            let wanted = m.get("paneId").and_then(|v| v.as_str());
+            let released: Vec<String> = watching
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| wanted.map_or(true, |w| w == p.as_str()))
+                .cloned()
+                .collect();
+            for p in released {
+                if watching.lock().unwrap().remove(&p) {
+                    unwatch(&p);
+                }
+            }
         }
         Some("write") => {
             let pid = m.get("paneId").and_then(|v| v.as_str());
             let data = m.get("data").and_then(|v| v.as_str());
-            let watched = pane_id.lock().unwrap().clone();
             let live = live_panes(app);
-            if let Some((pid, data)) = valid_write(watched.as_deref(), pid, data, &live) {
+            if let Some((pid, data)) = valid_write(&watching.lock().unwrap(), pid, data, &live) {
                 let _ = app.state::<crate::pty::PtyManager>().write_term(pid, data);
             }
         }
         Some("approve") => {
-            let rid = m.get("requestId").and_then(|v| v.as_str()).map(String::from);
+            let rid = m
+                .get("requestId")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             let decision = m.get("decision").and_then(|v| v.as_str());
             if let (Some(rid), Some(dec @ ("allow" | "deny"))) = (rid, decision) {
                 crate::bridge::resolve_approval(&rid, dec == "allow");
@@ -577,24 +686,48 @@ async fn handle_incoming(
     }
 }
 
-/* a write is only delivered when it targets the pane this connection is
-   currently watching, that pane is still live, and the payload is bounded */
+/* a write is only delivered when it targets a pane this connection may type
+into, that pane is still live, and the payload is bounded. `prompt` passes
+the pane twice so it can name its own target: the session tab is not a
+watch, and the pty it types into is the same one either way. */
 fn valid_write<'a>(
-    watched: Option<&'a str>,
+    watching: &HashSet<String>,
     pane_id: Option<&'a str>,
     data: Option<&'a str>,
     live: &[String],
 ) -> Option<(&'a str, &'a str)> {
-    let watched = watched?;
     let pid = pane_id?;
     let data = data?;
-    if pid != watched || data.is_empty() || data.len() > MAX_WRITE_BYTES {
+    /* the token is shell authority, so a write is only ever accepted for a
+    pane this same socket already asked to watch */
+    if !watching.contains(pid) || data.is_empty() || data.len() > MAX_WRITE_BYTES {
         return None;
     }
     if !live.iter().any(|id| id == pid) {
         return None;
     }
     Some((pid, data))
+}
+
+#[cfg(test)]
+mod watch_registry {
+    use super::*;
+
+    /* global state, so each case uses its own pane ids */
+    #[test]
+    fn counts_per_connection_and_drops_at_zero() {
+        watch("w-1");
+        watch("w-1");
+        assert!(is_watched("w-1"));
+        unwatch("w-1");
+        assert!(is_watched("w-1"), "a second phone is still watching");
+        unwatch("w-1");
+        assert!(!is_watched("w-1"));
+        /* an unbalanced release must not resurrect or wrap the count */
+        unwatch("w-1");
+        assert!(!is_watched("w-1"));
+        assert!(!is_watched("w-unknown"));
+    }
 }
 
 #[cfg(test)]
@@ -605,35 +738,43 @@ mod write_validation {
         vec!["t-1".to_string(), "t-2".to_string()]
     }
 
+    fn w(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn rejects_missing_or_empty_write() {
         let l = live();
-        assert!(valid_write(Some("t-1"), None, Some("ls"), &l).is_none());
-        assert!(valid_write(Some("t-1"), Some("t-1"), None, &l).is_none());
-        assert!(valid_write(Some("t-1"), Some("t-1"), Some(""), &l).is_none());
+        assert!(valid_write(&w(&["t-1"]), None, Some("ls"), &l).is_none());
+        assert!(valid_write(&w(&["t-1"]), Some("t-1"), None, &l).is_none());
+        assert!(valid_write(&w(&["t-1"]), Some("t-1"), Some(""), &l).is_none());
     }
 
     #[test]
     fn rejects_a_pane_this_connection_is_not_watching() {
         let l = live();
-        assert!(valid_write(None, Some("t-1"), Some("ls"), &l).is_none());
-        assert!(valid_write(Some("t-1"), Some("t-2"), Some("ls"), &l).is_none());
+        assert!(valid_write(&w(&[]), Some("t-1"), Some("ls"), &l).is_none());
+        assert!(valid_write(&w(&["t-1"]), Some("t-2"), Some("ls"), &l).is_none());
     }
 
     #[test]
     fn rejects_a_pane_that_is_not_live() {
-        assert!(valid_write(Some("t-9"), Some("t-9"), Some("ls"), &live()).is_none());
+        assert!(valid_write(&w(&["t-9"]), Some("t-9"), Some("ls"), &live()).is_none());
     }
 
     #[test]
     fn rejects_an_oversized_payload() {
         let big = "a".repeat(MAX_WRITE_BYTES + 1);
-        assert!(valid_write(Some("t-1"), Some("t-1"), Some(&big), &live()).is_none());
+        assert!(valid_write(&w(&["t-1"]), Some("t-1"), Some(&big), &live()).is_none());
     }
 
     #[test]
     fn accepts_the_watched_live_pane() {
-        let (pid, data) = valid_write(Some("t-1"), Some("t-1"), Some("ls -la\r"), &live()).expect("valid");
+        let (pid, data) =
+            valid_write(&w(&["t-1"]), Some("t-1"), Some("ls -la\r"), &live()).expect("valid");
+        /* the second pane of a split desktop is watched too, so it takes
+        input the same way the first one does */
+        valid_write(&w(&["t-1", "t-2"]), Some("t-2"), Some("ls\r"), &live()).expect("valid");
         assert_eq!(pid, "t-1");
         assert_eq!(data, "ls -la\r");
     }
@@ -647,35 +788,105 @@ fn broadcast(msg: RemoteMsg) {
     }
 }
 
-fn broadcast_view(pane_id: &str, text: &str) {
-    /* text-only on the tick path: html is rendered on demand when a phone
-       actually watches the pane (handle_incoming "watch"), not for every
-       dirty pane every 250 ms */
-    broadcast(RemoteMsg::View { pane_id: pane_id.to_string(), text: text.to_string(), html: String::new() });
+/* ---------------- watched-pane registry ----------------
+The mirror only renders what somebody is actually looking at. Counted per
+connection (two phones may watch one pane) and released on unwatch, on
+socket close and on stop_remote — a leaked count would keep a pane
+re-serializing for the rest of the session. */
+fn watched() -> &'static Mutex<HashMap<String, u32>> {
+    static WATCHED: std::sync::OnceLock<Mutex<HashMap<String, u32>>> = std::sync::OnceLock::new();
+    WATCHED.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/* serialize each dirty pane once per tick. HashSet dedups: a busy pane fires
-   on_term_data many times per 250 ms window, and the old Vec pushed one
-   entry per event — same pane serialized N times per tick. */
-fn push_dirty(dirty: &Arc<Mutex<std::collections::HashSet<String>>>) {
-    let pending: Vec<String> = dirty.lock().unwrap().drain().collect();
+fn watch(pane_id: &str) {
+    *watched()
+        .lock()
+        .unwrap()
+        .entry(pane_id.to_string())
+        .or_insert(0) += 1;
+}
+
+fn unwatch(pane_id: &str) {
+    let mut map = watched().lock().unwrap();
+    if let Some(n) = map.get_mut(pane_id) {
+        *n = n.saturating_sub(1);
+        if *n == 0 {
+            map.remove(pane_id);
+        }
+    }
+}
+
+fn is_watched(pane_id: &str) -> bool {
+    watched().lock().unwrap().contains_key(pane_id)
+}
+
+/* serialize each dirty pane once per tick, and only for panes a phone is
+watching: the old path re-serialized every busy pane and pushed it to every
+socket four times a second, which is where the phone-side lag came from.
+HashSet dedups so a busy pane fires once, not once per on_term_data.
+The frame is a fresh full render — the daemon's hot tick is text-only and
+the cache would hand back a stale, mis-colored one. Identical frames are
+dropped, so an idle pane costs nothing on the wire or in the DOM. */
+fn push_dirty(
+    app: &tauri::AppHandle,
+    dirty: &Arc<Mutex<std::collections::HashSet<String>>>,
+    last: &Mutex<HashMap<String, String>>,
+) {
+    let pending: Vec<String> = dirty
+        .lock()
+        .unwrap()
+        .drain()
+        .filter(|id| is_watched(id))
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+    let pty = app.state::<crate::pty::PtyManager>();
+    let mut last = last.lock().unwrap();
     for pane_id in pending {
-        broadcast_view(&pane_id, &crate::detect::screen::screen_dump(&pane_id));
+        /* ponytail: one blocking daemon round trip per watched pane per tick,
+        on a dedicated thread — a stalled daemon delays the mirror only */
+        let (text, html) = match pty.snapshot_html(&pane_id) {
+            Some(s) => {
+                crate::detect::screen::update_snapshot(&pane_id, s.clone());
+                (s.text, s.html)
+            }
+            /* pane gone or daemon unreachable: plain text beats a stale
+            colored frame — right content without color beats wrong */
+            None => (crate::detect::screen::screen_dump(&pane_id), String::new()),
+        };
+        if last
+            .get(&pane_id)
+            .map(|prev| prev == &text)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        last.insert(pane_id.clone(), text.clone());
+        broadcast(RemoteMsg::View {
+            pane_id,
+            text,
+            html,
+        });
     }
 }
 
 /* bridge + runtime deliver via push callbacks; wire them once. Each reads
-   CURRENT_OUT so a restart reuses the live channel without re-subscribing. */
+CURRENT_OUT so a restart reuses the live channel without re-subscribing. */
 fn ensure_feeds() {
     FEEDS_ONCE.call_once(|| {
         crate::bridge::on_approval_created(move |req| {
             broadcast(RemoteMsg::Json(js(&json!({"t": "approval", "req": req}))));
         });
         crate::bridge::on_approval_closed(move |request_id| {
-            broadcast(RemoteMsg::Json(js(&json!({"t": "approvalClosed", "requestId": request_id}))));
+            broadcast(RemoteMsg::Json(js(
+                &json!({"t": "approvalClosed", "requestId": request_id}),
+            )));
         });
         crate::runtime::on_runtime_update(move |_| {
-            broadcast(RemoteMsg::Json(js(&json!({"t": "status", "statuses": crate::runtime::latest_runtime_statuses()}))));
+            broadcast(RemoteMsg::Json(js(
+                &json!({"t": "status", "statuses": crate::runtime::latest_runtime_statuses()}),
+            )));
         });
     });
 }
@@ -691,9 +902,9 @@ pub fn start_remote(app: &tauri::AppHandle, state: &AppStateManager) {
     let port = remote_port(&state.get_state().prefs);
 
     /* bind synchronously so EADDRINUSE surfaces immediately (like the TS
-       listen callback that records lastError before resolving). Loopback
-       only: the phone path is the cloudflared tunnel, so plain-HTTP LAN
-       access is unreachable by construction. */
+    listen callback that records lastError before resolving). Loopback
+    only: the phone path is the cloudflared tunnel, so plain-HTTP LAN
+    access is unreachable by construction. */
     let listener = match std::net::TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
@@ -706,9 +917,9 @@ pub fn start_remote(app: &tauri::AppHandle, state: &AppStateManager) {
         }
     };
     /* tokio::net::TcpListener::from_std needs an entered Tokio reactor
-       (tokio-rs/tokio#7172) and a live one to register with — this runs
-       synchronously on the Tauri command thread, outside the async
-       runtime, so enter Tauri's managed runtime handle first. */
+    (tokio-rs/tokio#7172) and a live one to register with — this runs
+    synchronously on the Tauri command thread, outside the async
+    runtime, so enter Tauri's managed runtime handle first. */
     let _guard = tauri::async_runtime::handle().inner().enter();
     if let Err(e) = listener.set_nonblocking(true) {
         *last_error().lock().unwrap() = Some(e.to_string());
@@ -724,7 +935,8 @@ pub fn start_remote(app: &tauri::AppHandle, state: &AppStateManager) {
     *last_error().lock().unwrap() = None;
 
     let (out_tx, _) = tokio::sync::broadcast::channel::<RemoteMsg>(256);
-    let dirty: Arc<Mutex<std::collections::HashSet<String>>> = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let dirty: Arc<Mutex<std::collections::HashSet<String>>> =
+        Arc::new(Mutex::new(std::collections::HashSet::new()));
     let running = Arc::new(AtomicBool::new(true));
     let (kill_tx, kill_rx) = tokio::sync::watch::channel(false);
     *current_out().lock().unwrap() = Some(out_tx.clone());
@@ -735,7 +947,10 @@ pub fn start_remote(app: &tauri::AppHandle, state: &AppStateManager) {
         out: out_tx.clone(),
         app: app.clone(),
     };
-    let router = Router::new().route("/", get(handle_page)).route("/ws", get(handle_ws)).with_state(ctx);
+    let router = Router::new()
+        .route("/", get(handle_page))
+        .route("/ws", get(handle_ws))
+        .with_state(ctx);
 
     /* subscribe to pty output/exit now (synchronously), move receivers in */
     let app1 = app.clone();
@@ -744,7 +959,9 @@ pub fn start_remote(app: &tauri::AppHandle, state: &AppStateManager) {
         let mut rx = app1.state::<crate::pty::PtyManager>().on_term_data();
         loop {
             match rx.recv().await {
-                Ok((id, _)) => { d1.lock().unwrap().insert(id); }
+                Ok((id, _)) => {
+                    d1.lock().unwrap().insert(id);
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(_) => return,
             }
@@ -758,7 +975,9 @@ pub fn start_remote(app: &tauri::AppHandle, state: &AppStateManager) {
             match rx.recv().await {
                 Ok((id, _)) => {
                     d2.lock().unwrap().remove(&id);
-                    broadcast(RemoteMsg::Json(js(&json!({"t": "panes", "panes": pane_list(&app2)}))));
+                    broadcast(RemoteMsg::Json(js(
+                        &json!({"t": "panes", "panes": pane_list(&app2)}),
+                    )));
                     broadcast(RemoteMsg::Gone { pane_id: id });
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -770,10 +989,12 @@ pub fn start_remote(app: &tauri::AppHandle, state: &AppStateManager) {
     /* fixed tick while the server runs; exits on stop */
     let d3 = dirty.clone();
     let run3 = running.clone();
+    let app3 = app.clone();
     std::thread::spawn(move || {
+        let last = Mutex::new(HashMap::new());
         while run3.load(Ordering::SeqCst) {
             std::thread::sleep(std::time::Duration::from_millis(WATCH_TICK_MS));
-            push_dirty(&d3);
+            push_dirty(&app3, &d3, &last);
         }
     });
 
@@ -788,18 +1009,18 @@ pub fn start_remote(app: &tauri::AppHandle, state: &AppStateManager) {
         run_serve.store(false, Ordering::SeqCst);
     });
 
-    *server().lock().unwrap() = Some(ServerState {
-        kill_tx,
-        running,
-    });
+    *server().lock().unwrap() = Some(ServerState { kill_tx, running });
 }
 
 pub fn stop_remote() {
-    let st = server().lock().unwrap().take();
-    let Some(st) = st else { return };
+    let Some(st) = server().lock().unwrap().take() else {
+        return;
+    };
     let _ = st.kill_tx.send(true);
     st.running.store(false, Ordering::SeqCst);
     *current_out().lock().unwrap() = None;
+    /* every socket dies with the server; drop their watches with it */
+    watched().lock().unwrap().clear();
 }
 
 // ---------------- cloudflare quick tunnel (public HTTPS) ----------------
@@ -826,7 +1047,11 @@ fn tunnel_error() -> &'static Mutex<Option<String>> {
 }
 
 pub fn tunnel_url() -> Option<String> {
-    tunnel().lock().unwrap().as_ref().and_then(|t| t.url.lock().unwrap().clone())
+    tunnel()
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|t| t.url.lock().unwrap().clone())
 }
 
 pub fn tunnel_running() -> bool {
@@ -837,7 +1062,9 @@ pub fn tunnel_running() -> bool {
 fn parse_tunnel_url(line: &str) -> Option<String> {
     let start = line.find("https://")?;
     let rest = &line[start..];
-    let end = rest.find(|c: char| c.is_whitespace() || c == '|').unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == '|')
+        .unwrap_or(rest.len());
     let url = &rest[..end];
     url.contains(".trycloudflare.com").then(|| url.to_string())
 }
@@ -858,26 +1085,48 @@ fn cloudflared_target() -> Option<&'static str> {
     }
 }
 
-fn cloudflared_resource_path(resource_dir: &Path, target: &str, windows: bool) -> std::path::PathBuf {
-    resource_dir.join("cloudflared").join(target).join(if windows { "cloudflared.exe" } else { "cloudflared" })
+fn cloudflared_resource_path(
+    resource_dir: &Path,
+    target: &str,
+    windows: bool,
+) -> std::path::PathBuf {
+    resource_dir
+        .join("cloudflared")
+        .join(target)
+        .join(if windows {
+            "cloudflared.exe"
+        } else {
+            "cloudflared"
+        })
 }
 
 /* the gzipped form of the same path: what the bundler actually ships (39.8 MB
-   raw -> 20.3 MB gzipped on darwin-x86_64, 37.1 -> 18.5 on darwin-aarch64) */
-fn cloudflared_gz_resource_path(resource_dir: &Path, target: &str, windows: bool) -> std::path::PathBuf {
+raw -> 20.3 MB gzipped on darwin-x86_64, 37.1 -> 18.5 on darwin-aarch64) */
+fn cloudflared_gz_resource_path(
+    resource_dir: &Path,
+    target: &str,
+    windows: bool,
+) -> std::path::PathBuf {
     let mut p = cloudflared_resource_path(resource_dir, target, windows).into_os_string();
     p.push(".gz");
     PathBuf::from(p)
 }
 
 /* the bundler declares this resource as `../resources/cloudflared/...` and stores
-   `..` components as `_up_`, so the packaged lookup has to go through
-   `PathResolver::resolve` (which applies the same rewrite). Joining
-   `resource_dir()` directly lands on `Resources/cloudflared/...` — a path that
-   never exists in an installed build — and the tunnel then reports
-   "cloudflared is not bundled for this platform". */
+`..` components as `_up_`, so the packaged lookup has to go through
+`PathResolver::resolve` (which applies the same rewrite). Joining
+`resource_dir()` directly lands on `Resources/cloudflared/...` — a path that
+never exists in an installed build — and the tunnel then reports
+"cloudflared is not bundled for this platform". */
 fn cloudflared_resource_rel(target: &str, windows: bool) -> String {
-    format!("../resources/cloudflared/{target}/{}", if windows { "cloudflared.exe" } else { "cloudflared" })
+    format!(
+        "../resources/cloudflared/{target}/{}",
+        if windows {
+            "cloudflared.exe"
+        } else {
+            "cloudflared"
+        }
+    )
 }
 
 fn cloudflared_resource_rel_gz(target: &str, windows: bool) -> String {
@@ -885,9 +1134,9 @@ fn cloudflared_resource_rel_gz(target: &str, windows: bool) -> String {
 }
 
 /* identifies the exact source file a cached binary was inflated from, so an
-   app update that ships a new cloudflared re-inflates instead of reusing the
-   stale binary. Length + mtime is enough: this is a build artifact inside the
-   signed bundle, not untrusted input. */
+app update that ships a new cloudflared re-inflates instead of reusing the
+stale binary. Length + mtime is enough: this is a build artifact inside the
+signed bundle, not untrusted input. */
 fn source_stamp(gz: &Path) -> Option<String> {
     let meta = std::fs::metadata(gz).ok()?;
     let nanos = meta
@@ -900,10 +1149,13 @@ fn source_stamp(gz: &Path) -> Option<String> {
 }
 
 /* inflate `gz` to `bin`, chmod +x, and record the source stamp. Writes to a
-   process-unique temp file and renames, so a concurrent inflate or a crash
-   never leaves a truncated executable behind. */
+process-unique temp file and renames, so a concurrent inflate or a crash
+never leaves a truncated executable behind. */
 fn inflate_to(gz: &Path, bin: &Path, stamp: &Path) -> std::io::Result<()> {
-    let name = bin.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "cloudflared".to_string());
+    let name = bin
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "cloudflared".to_string());
     let tmp = bin.with_file_name(format!("{name}.{}.tmp", std::process::id()));
     let result = (|| -> std::io::Result<()> {
         let mut input = flate2::read::GzDecoder::new(std::fs::File::open(gz)?);
@@ -927,13 +1179,27 @@ fn inflate_to(gz: &Path, bin: &Path, stamp: &Path) -> std::io::Result<()> {
 }
 
 /* return an executable path for the bundled cloudflared, inflating the shipped
-   .gz into the app cache once (and again whenever the bundled copy changes).
-   ponytail: dev and installed builds share this cache dir, so alternating
-   between them re-inflates each time; give it its own subdir if that ever
-   matters. Windows also fails the rename if the installed app is running. */
-fn unpack_cloudflared(app: &tauri::AppHandle, target: &str, is_win: bool, gz: &Path) -> Option<String> {
-    let name = if is_win { "cloudflared.exe" } else { "cloudflared" };
-    let dir = app.path().app_cache_dir().ok()?.join("cloudflared").join(target);
+.gz into the app cache once (and again whenever the bundled copy changes).
+ponytail: dev and installed builds share this cache dir, so alternating
+between them re-inflates each time; give it its own subdir if that ever
+matters. Windows also fails the rename if the installed app is running. */
+fn unpack_cloudflared(
+    app: &tauri::AppHandle,
+    target: &str,
+    is_win: bool,
+    gz: &Path,
+) -> Option<String> {
+    let name = if is_win {
+        "cloudflared.exe"
+    } else {
+        "cloudflared"
+    };
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .ok()?
+        .join("cloudflared")
+        .join(target);
     let bin = dir.join(name);
     let stamp = dir.join("source.meta");
     let source = source_stamp(gz)?;
@@ -955,18 +1221,23 @@ fn bundled_cloudflared(app: &tauri::AppHandle) -> Option<String> {
     let target = cloudflared_target()?;
     let is_win = cfg!(target_os = "windows");
     /* resolve() applies the bundler's `..` -> `_up_` rewrite, so the packaged
-       dir has to come from a resolved path rather than resource_dir() */
+    dir has to come from a resolved path rather than resource_dir() */
     let mut packed: Vec<PathBuf> = Vec::new();
-    if let Ok(p) = app.path().resolve(cloudflared_resource_rel_gz(target, is_win), BaseDirectory::Resource) {
+    if let Ok(p) = app.path().resolve(
+        cloudflared_resource_rel_gz(target, is_win),
+        BaseDirectory::Resource,
+    ) {
         packed.push(p);
     }
     /* dev fallback: during `tauri dev` resourceDir is the temp bundle dir, so
-       also try the repo layout relative to the executable / cwd. The repo
-       holds the same .gz the bundle does (prepare:cloudflared removes the raw
-       binary), so dev exercises the inflate path in production too. */
+    also try the repo layout relative to the executable / cwd. The repo
+    holds the same .gz the bundle does (prepare:cloudflared removes the raw
+    binary), so dev exercises the inflate path in production too. */
     for base in [
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../resources"),
-        std::env::current_dir().unwrap_or_default().join("resources"),
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join("resources"),
     ] {
         packed.push(cloudflared_gz_resource_path(&base, target, is_win));
     }
@@ -976,10 +1247,58 @@ fn bundled_cloudflared(app: &tauri::AppHandle) -> Option<String> {
         .find_map(|gz| unpack_cloudflared(app, target, is_win, &gz))
 }
 
+/* A normal quit already calls stop_tunnel (see lib.rs RunEvent::ExitRequested).
+An abnormal one cannot: a crash, a force quit or a logout kills the app
+without running any of that, and its cloudflared goes on serving a public
+URL for a port nothing listens on — the old pairing QR answers 502 forever
+and the next launch finds the port taken. No portable API ties a child to
+its parent's death, so the next launch reclaims its own instead: a
+cloudflared aimed at our port whose parent is init is an orphan by
+construction, and a tunnel a live app is still using has a real parent. */
+fn reap_orphaned_tunnels(port: u16) {
+    #[cfg(windows)]
+    let _ = port; // no `ps` on Windows; the tunnel dies with its console there
+    #[cfg(not(windows))]
+    {
+        let target = format!("http://127.0.0.1:{port}");
+        let Ok(list) = std::process::Command::new("ps")
+            .args(["-eo", "pid=,ppid=,args="])
+            .output()
+        else {
+            return;
+        };
+        for line in String::from_utf8_lossy(&list.stdout).lines() {
+            if let Some(pid) = orphan_tunnel_pid(line, &target) {
+                let _ = std::process::Command::new("kill")
+                    .arg(pid.to_string())
+                    .status();
+            }
+        }
+    }
+}
+
+/* the pid of a cloudflared serving `target` that has no parent left to kill
+it. Split out from the process list so the rule is testable. */
+fn orphan_tunnel_pid(line: &str, target: &str) -> Option<u32> {
+    let mut field = line.split_whitespace();
+    let pid: u32 = field.next()?.parse().ok()?;
+    let ppid: u32 = field.next()?.parse().ok()?;
+    if ppid != 1 {
+        return None; // still owned by a running app
+    }
+    let args = field.collect::<Vec<_>>().join(" ");
+    if args.contains("cloudflared") && args.contains(target) {
+        Some(pid)
+    } else {
+        None
+    }
+}
+
 pub fn start_tunnel(app: &tauri::AppHandle, port: u16) {
     if tunnel_running() {
         return;
     }
+    reap_orphaned_tunnels(port);
     let bin = bundled_cloudflared(app).or_else(|| crate::shell::find_on_path("cloudflared"));
     let Some(bin) = bin else {
         *tunnel_error().lock().unwrap() = Some("cloudflared is not bundled for this platform and was not found on PATH. Install it from https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/ to enable public HTTPS.".to_string());
@@ -996,8 +1315,7 @@ pub fn start_tunnel(app: &tauri::AppHandle, port: u16) {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let mut child = match cmd.spawn()
-    {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             *tunnel_error().lock().unwrap() = Some(format!("failed to start cloudflared: {e}"));
@@ -1014,15 +1332,21 @@ pub fn start_tunnel(app: &tauri::AppHandle, port: u16) {
         // watch both streams; cloudflared prints the URL to stderr on most
         // builds but some wrappers use stdout — check both
         let mut readers: Vec<Box<dyn BufRead + Send>> = Vec::new();
-        if let Some(s) = stderr { readers.push(Box::new(std::io::BufReader::new(s))); }
-        if let Some(s) = stdout { readers.push(Box::new(std::io::BufReader::new(s))); }
+        if let Some(s) = stderr {
+            readers.push(Box::new(std::io::BufReader::new(s)));
+        }
+        if let Some(s) = stdout {
+            readers.push(Box::new(std::io::BufReader::new(s)));
+        }
         for mut r in readers {
             // drain in a nested loop so the first stream doesn't block forever
             // on a dead child; each reader runs to EOF independently
             for line in (&mut r).lines().map_while(Result::ok) {
                 if let Some(u) = parse_tunnel_url(&line) {
                     let mut cur = url2.lock().unwrap();
-                    if cur.is_none() { *cur = Some(u); }
+                    if cur.is_none() {
+                        *cur = Some(u);
+                    }
                 }
             }
         }
@@ -1045,13 +1369,14 @@ pub fn stop_tunnel() {
     let _ = st.child.wait();
 }
 
-
 /* ---------------- settings surface ---------------- */
 
 /* the single pairing URL: the tunnel URL with the token attached; None
-   while cloudflared hasn't printed its URL yet (or isn't running) */
+while cloudflared hasn't printed its URL yet (or isn't running) */
 fn pairing_url(tunnel: Option<String>, token: &str) -> Vec<String> {
-    tunnel.map(|u| vec![format!("{u}/?t={token}")]).unwrap_or_default()
+    tunnel
+        .map(|u| vec![format!("{u}/?t={token}")])
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1089,7 +1414,11 @@ fn qr_svg(url: &str) -> Option<String> {
 pub fn pairing_info(state: &AppStateManager) -> RemotePairing {
     let prefs = state.get_state().prefs;
     let port = remote_port(&prefs);
-    let token = prefs.remote.as_ref().and_then(|r| r.token.clone()).unwrap_or_default();
+    let token = prefs
+        .remote
+        .as_ref()
+        .and_then(|r| r.token.clone())
+        .unwrap_or_default();
     let base = tunnel_url();
     let paired = base.clone().map(|u| format!("{u}/?t={token}"));
     let urls = pairing_url(base, &token);
@@ -1108,7 +1437,11 @@ pub fn pairing_info(state: &AppStateManager) -> RemotePairing {
     }
 }
 
-pub fn set_remote_enabled(app: &tauri::AppHandle, state: &AppStateManager, on: bool) -> RemotePairing {
+pub fn set_remote_enabled(
+    app: &tauri::AppHandle,
+    state: &AppStateManager,
+    on: bool,
+) -> RemotePairing {
     state.patch_prefs(|p| {
         let r = p.remote.get_or_insert_with(|| RemotePrefs {
             enabled: None,
@@ -1120,7 +1453,7 @@ pub fn set_remote_enabled(app: &tauri::AppHandle, state: &AppStateManager, on: b
     if on {
         start_remote(app, state);
         /* HTTPS is the only access path — the tunnel always follows the
-           local server */
+        local server */
         if remote_running() {
             start_tunnel(app, remote_port(&state.get_state().prefs));
         }
@@ -1132,10 +1465,10 @@ pub fn set_remote_enabled(app: &tauri::AppHandle, state: &AppStateManager, on: b
 }
 
 /* boot-time restore: Electron's index.ts calls startRemote() when
-   prefs.remote.enabled was persisted true from a prior session. The
-   Tauri setup hook has no equivalent — without this, `enabled` shows
-   "On" from disk while the server/tunnel never actually starts, so the
-   panel is stuck on "Starting..." until the user manually flips it. */
+prefs.remote.enabled was persisted true from a prior session. The
+Tauri setup hook has no equivalent — without this, `enabled` shows
+"On" from disk while the server/tunnel never actually starts, so the
+panel is stuck on "Starting..." until the user manually flips it. */
 pub fn restore_on_startup(app: &tauri::AppHandle, state: &AppStateManager) {
     let prefs = state.get_state().prefs;
     if !remote_enabled(&prefs) {
@@ -1147,7 +1480,11 @@ pub fn restore_on_startup(app: &tauri::AppHandle, state: &AppStateManager) {
     }
 }
 
-pub fn set_remote_port(app: &tauri::AppHandle, state: &AppStateManager, port: u16) -> RemotePairing {
+pub fn set_remote_port(
+    app: &tauri::AppHandle,
+    state: &AppStateManager,
+    port: u16,
+) -> RemotePairing {
     state.patch_prefs(|p| {
         let r = p.remote.get_or_insert_with(|| RemotePrefs {
             enabled: None,
@@ -1179,7 +1516,9 @@ mod tests {
         let b = random_token();
         assert_ne!(a, b);
         assert_eq!(a.len(), 32); // 24 bytes base64url → 32 chars
-        assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(a
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
     }
 
     #[test]
@@ -1197,36 +1536,76 @@ mod tests {
         assert!(!s.contains('_'));
     }
     #[test]
+    fn a_tunnel_left_behind_by_a_dead_app_is_reclaimed() {
+        let target = "http://127.0.0.1:8765";
+        /* an app killed with SIGKILL leaves this: no parent left to kill it */
+        let orphan = "  45925     1 /Users/x/cloudflared tunnel --url http://127.0.0.1:8765";
+        assert_eq!(orphan_tunnel_pid(orphan, target), Some(45925));
+        /* a tunnel a live app is still using has a real parent: hands off */
+        let live = "  45925 12345 /Users/x/cloudflared tunnel --url http://127.0.0.1:8765";
+        assert_eq!(orphan_tunnel_pid(live, target), None);
+        /* another app's tunnel, a different port, or no tunnel at all */
+        assert_eq!(orphan_tunnel_pid(orphan, "http://127.0.0.1:9999"), None);
+        assert_eq!(
+            orphan_tunnel_pid("  45925     1 /usr/bin/ssh -p 8765 elsewhere", target),
+            None
+        );
+        assert_eq!(orphan_tunnel_pid("garbage", target), None);
+        assert_eq!(orphan_tunnel_pid("", target), None);
+    }
+
+    #[test]
     fn bundled_resource_path_uses_platform_binary_name() {
         let root = Path::new("/resources");
-        assert_eq!(cloudflared_resource_path(root, "darwin-x86_64", false), Path::new("/resources/cloudflared/darwin-x86_64/cloudflared"));
-        assert_eq!(cloudflared_resource_path(root, "windows-x86_64", true), Path::new("/resources/cloudflared/windows-x86_64/cloudflared.exe"));
+        assert_eq!(
+            cloudflared_resource_path(root, "darwin-x86_64", false),
+            Path::new("/resources/cloudflared/darwin-x86_64/cloudflared")
+        );
+        assert_eq!(
+            cloudflared_resource_path(root, "windows-x86_64", true),
+            Path::new("/resources/cloudflared/windows-x86_64/cloudflared.exe")
+        );
     }
 
     /* the packaged lookup must stay `../`-relative: the bundler rewrites the
-       leading `..` to `_up_` (tauri_utils::resources::resource_relpath)
-       because tauri.conf.json points at the repo-level resources/ dir */
+    leading `..` to `_up_` (tauri_utils::resources::resource_relpath)
+    because tauri.conf.json points at the repo-level resources/ dir */
     #[test]
     fn bundled_resource_rel_requires_up_prefix_rewrite() {
-        assert_eq!(cloudflared_resource_rel("darwin-x86_64", false), "../resources/cloudflared/darwin-x86_64/cloudflared");
-        assert_eq!(cloudflared_resource_rel("windows-x86_64", true), "../resources/cloudflared/windows-x86_64/cloudflared.exe");
+        assert_eq!(
+            cloudflared_resource_rel("darwin-x86_64", false),
+            "../resources/cloudflared/darwin-x86_64/cloudflared"
+        );
+        assert_eq!(
+            cloudflared_resource_rel("windows-x86_64", true),
+            "../resources/cloudflared/windows-x86_64/cloudflared.exe"
+        );
     }
 
     /* the bundler ships only the .gz (tauri.conf.json bundles the
-       resources/cloudflared directory, which prepare:cloudflared leaves holding
-       nothing but the archive), so the packaged lookup has to name the
-       compressed file */
+    resources/cloudflared directory, which prepare:cloudflared leaves holding
+    nothing but the archive), so the packaged lookup has to name the
+    compressed file */
     #[test]
     fn bundled_gz_paths_mirror_the_binary_paths() {
         let root = Path::new("/resources");
-        assert_eq!(cloudflared_gz_resource_path(root, "darwin-x86_64", false), Path::new("/resources/cloudflared/darwin-x86_64/cloudflared.gz"));
-        assert_eq!(cloudflared_gz_resource_path(root, "windows-x86_64", true), Path::new("/resources/cloudflared/windows-x86_64/cloudflared.exe.gz"));
-        assert_eq!(cloudflared_resource_rel_gz("linux-aarch64", false), "../resources/cloudflared/linux-aarch64/cloudflared.gz");
+        assert_eq!(
+            cloudflared_gz_resource_path(root, "darwin-x86_64", false),
+            Path::new("/resources/cloudflared/darwin-x86_64/cloudflared.gz")
+        );
+        assert_eq!(
+            cloudflared_gz_resource_path(root, "windows-x86_64", true),
+            Path::new("/resources/cloudflared/windows-x86_64/cloudflared.exe.gz")
+        );
+        assert_eq!(
+            cloudflared_resource_rel_gz("linux-aarch64", false),
+            "../resources/cloudflared/linux-aarch64/cloudflared.gz"
+        );
     }
 
     /* the inflate step is what makes the gzipped bundle usable: bytes must
-       round-trip, the binary must come out executable, the *.tmp staging file
-       must not survive, and the stamp must record this exact source */
+    round-trip, the binary must come out executable, the *.tmp staging file
+    must not survive, and the stamp must record this exact source */
     #[test]
     fn inflates_gz_and_stamps_the_source() {
         use std::io::Write;
@@ -1235,7 +1614,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let gz = dir.join("cloudflared.gz");
         let payload = b"#!/bin/sh\necho cloudflared\n";
-        let mut enc = flate2::write::GzEncoder::new(std::fs::File::create(&gz).unwrap(), flate2::Compression::default());
+        let mut enc = flate2::write::GzEncoder::new(
+            std::fs::File::create(&gz).unwrap(),
+            flate2::Compression::default(),
+        );
         enc.write_all(payload).unwrap();
         enc.finish().unwrap();
 
@@ -1244,18 +1626,26 @@ mod tests {
         inflate_to(&gz, &bin, &stamp).unwrap();
 
         assert_eq!(std::fs::read(&bin).unwrap(), payload);
-        assert_eq!(std::fs::read_to_string(&stamp).unwrap(), source_stamp(&gz).unwrap());
-        assert!(!dir.join(format!("cloudflared.{}.tmp", std::process::id())).exists());
+        assert_eq!(
+            std::fs::read_to_string(&stamp).unwrap(),
+            source_stamp(&gz).unwrap()
+        );
+        assert!(!dir
+            .join(format!("cloudflared.{}.tmp", std::process::id()))
+            .exists());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&bin).unwrap().permissions().mode() & 0o777, 0o755);
+            assert_eq!(
+                std::fs::metadata(&bin).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /* a corrupt bundle must fail the inflate instead of leaving a truncated
-       executable for spawn to trip over */
+    executable for spawn to trip over */
     #[test]
     fn failed_inflate_leaves_no_staged_or_target_file() {
         let dir = std::env::temp_dir().join(format!("bentomux-inflate-bad-{}", std::process::id()));
@@ -1267,35 +1657,63 @@ mod tests {
         let bin = dir.join("cloudflared");
         assert!(inflate_to(&gz, &bin, &dir.join("source.meta")).is_err());
         assert!(!bin.exists());
-        assert!(!dir.join(format!("cloudflared.{}.tmp", std::process::id())).exists());
+        assert!(!dir
+            .join(format!("cloudflared.{}.tmp", std::process::id()))
+            .exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     /* the archive the bundler actually ships has to inflate into something
-       `start_tunnel` can spawn: this is the only check that runs the real 37-40 MB
-       artifact instead of a synthetic payload, and gets skipped (not silently
-       passed) when prepare:cloudflared has not run in this checkout */
+    `start_tunnel` can spawn: this is the only check that runs the real 37-40 MB
+    artifact instead of a synthetic payload, and gets skipped (not silently
+    passed) when prepare:cloudflared has not run in this checkout */
     #[test]
     fn real_bundled_archive_inflates_to_a_runnable_cloudflared() {
-        let Some(target) = cloudflared_target() else { return };
+        let Some(target) = cloudflared_target() else {
+            return;
+        };
         let is_win = cfg!(target_os = "windows");
-        let gz = cloudflared_gz_resource_path(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../resources"), target, is_win);
+        let gz = cloudflared_gz_resource_path(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../resources"),
+            target,
+            is_win,
+        );
         if !gz.is_file() {
-            eprintln!("skipping: {} not prepared (run `npm run prepare:cloudflared`)", gz.display());
+            eprintln!(
+                "skipping: {} not prepared (run `npm run prepare:cloudflared`)",
+                gz.display()
+            );
             return;
         }
         let dir = std::env::temp_dir().join(format!("bentomux-real-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join(if is_win { "cloudflared.exe" } else { "cloudflared" });
+        let bin = dir.join(if is_win {
+            "cloudflared.exe"
+        } else {
+            "cloudflared"
+        });
         inflate_to(&gz, &bin, &dir.join("source.meta")).unwrap();
 
         // a truncated decode would still return Ok, so size and execution both count
-        assert!(std::fs::metadata(&bin).unwrap().len() > 30 * 1024 * 1024, "inflated cloudflared is too small");
-        let out = std::process::Command::new(&bin).arg("--version").output().unwrap();
-        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(
+            std::fs::metadata(&bin).unwrap().len() > 30 * 1024 * 1024,
+            "inflated cloudflared is too small"
+        );
+        let out = std::process::Command::new(&bin)
+            .arg("--version")
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert!(out.status.success(), "cloudflared --version failed: {text}");
-        assert!(text.contains("cloudflared version"), "unexpected cloudflared output: {text}");
+        assert!(
+            text.contains("cloudflared version"),
+            "unexpected cloudflared output: {text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -1303,11 +1721,11 @@ mod tests {
 #[cfg(test)]
 mod smoke_socket_conversion {
     /* regression for the fix above: reproduces the exact bind ->
-       set_nonblocking -> from_std sequence start_remote runs, outside
-       any tokio::main/#[tokio::test] context (mirrors running on the
-       Tauri sync-command thread). Panics pre-fix with either
-       "Registering a blocking socket..." or "there is no reactor
-       running...". */
+    set_nonblocking -> from_std sequence start_remote runs, outside
+    any tokio::main/#[tokio::test] context (mirrors running on the
+    Tauri sync-command thread). Panics pre-fix with either
+    "Registering a blocking socket..." or "there is no reactor
+    running...". */
     #[test]
     fn tcp_listener_converts_without_reactor_panic() {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -1322,13 +1740,16 @@ mod smoke_tunnel {
     use super::*;
 
     /* end-to-end proof of the parsing + URL-building logic without
-       actually spawning cloudflared: a fixed cloudflared log line goes
-       in, the exact URL start_tunnel would capture comes out. */
+    actually spawning cloudflared: a fixed cloudflared log line goes
+    in, the exact URL start_tunnel would capture comes out. */
     #[test]
     fn parses_trycloudflare_url_from_log_line() {
         let line = "2026-09-11T02:30:21Z INF |  https://logan-section-yorkshire-petite.trycloudflare.com                                  |";
         let url = parse_tunnel_url(line).expect("should find url");
-        assert_eq!(url, "https://logan-section-yorkshire-petite.trycloudflare.com");
+        assert_eq!(
+            url,
+            "https://logan-section-yorkshire-petite.trycloudflare.com"
+        );
     }
 
     #[test]
@@ -1339,4 +1760,3 @@ mod smoke_tunnel {
         assert!(parse_tunnel_url(line2).is_none());
     }
 }
-

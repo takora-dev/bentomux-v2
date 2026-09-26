@@ -1,9 +1,9 @@
 /* ---------------- one pty per terminal tab (client side) ----------------
-   The ptys themselves belong to the pty host daemon (pty_host.rs) so they
-   survive this process exiting. This manager is the client: it spawns the
-   daemon on first use, keeps the app's view of which terms exist, and turns
-   host messages into the same `pty:data` / `pty:exit` events and broadcast
-   channels the rest of the backend already consumed. */
+The ptys themselves belong to the pty host daemon (pty_host.rs) so they
+survive this process exiting. This manager is the client: it spawns the
+daemon on first use, keeps the app's view of which terms exist, and turns
+host messages into the same `pty:data` / `pty:exit` events and broadcast
+channels the rest of the backend already consumed. */
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -16,7 +16,7 @@ use tauri::Emitter;
 
 use crate::pty_host::{connect_host, HostStream, PROTOCOL_VERSION};
 use crate::split_tree::{
-    first_leaf_id, leaf_ids, leaf_node, remove_leaf, remap_leaves, tree_from_legacy, PaneNode,
+    first_leaf_id, leaf_ids, leaf_node, remap_leaves, remove_leaf, tree_from_legacy, PaneNode,
 };
 use crate::state::{TabRec, WorkspaceRec};
 
@@ -24,14 +24,14 @@ use crate::state::{TabRec, WorkspaceRec};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /* Coalesce pty:data emits: busy agents produce many small daemon lines per
-   frame, and each app.emit is an IPC serialize+post into the WebView. Buffer
-   per pane and flush at ~60 Hz so one burst costs one emit. */
+frame, and each app.emit is an IPC serialize+post into the WebView. Buffer
+per pane and flush at ~60 Hz so one burst costs one emit. */
 const PTY_FLUSH_MS: u64 = 16;
 const PTY_MAX_BUFFER: usize = 256 * 1024;
 
 /* how long a command may wait for start()'s daemon handshake. Comfortably
-   above the handshake's own worst case (connect + two request timeouts) so
-   it never cuts a slow-but-working host off. */
+above the handshake's own worst case (connect + two request timeouts) so
+it never cuts a slow-but-working host off. */
 const READY_TIMEOUT: Duration = Duration::from_secs(45);
 
 /* snapshot of a term's identity for callers that don't need the handles */
@@ -63,7 +63,7 @@ fn host_verdict(version: u64, term_count: usize, just_spawned: bool) -> HostVerd
         return HostVerdict::Replace("protocol mismatch");
     }
     /* nothing to preserve, and it still carries the environment of whatever
-       launch started it: panes opened now should see this launch's PATH */
+    launch started it: panes opened now should see this launch's PATH */
     if !just_spawned && term_count == 0 {
         return HostVerdict::Replace("no live panes");
     }
@@ -73,8 +73,8 @@ fn host_verdict(version: u64, term_count: usize, just_spawned: bool) -> HostVerd
 pub struct PtyManager {
     terms: Arc<Mutex<HashMap<String, TermInfo>>>,
     /* the handle is set by start(), which runs inside Tauri's setup; the
-       reader thread takes the Arc and reads it at emit time, so panes that
-       produce output before that still reach the renderer */
+    reader thread takes the Arc and reads it at emit time, so panes that
+    produce output before that still reach the renderer */
     app: Arc<OnceLock<tauri::AppHandle>>,
     /* observers of raw pty output (agent detection feeds a headless parser) */
     data_tx: tokio::sync::broadcast::Sender<(String, String)>,
@@ -84,9 +84,9 @@ pub struct PtyManager {
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>>,
     seq: AtomicU64,
     /* the daemon handshake is done by start(), which can take seconds when
-       the host has to be spawned. Commands arrive on WebView2's threads the
-       moment the window paints, so they wait on this gate instead of racing
-       an empty transport. */
+    the host has to be spawned. Commands arrive on WebView2's threads the
+    moment the window paints, so they wait on this gate instead of racing
+    an empty transport. */
     ready: Mutex<bool>,
     ready_cv: Condvar,
 }
@@ -121,8 +121,8 @@ fn unb64(text: &str) -> Option<Vec<u8>> {
 
 impl PtyManager {
     /* Cheap and I/O-free on purpose: this runs on the Tauri Builder, before
-       the window exists, so `pty` is managed before WebView2 can fire its
-       first IPC call. The daemon handshake happens in start(), inside setup. */
+    the window exists, so `pty` is managed before WebView2 can fire its
+    first IPC call. The daemon handshake happens in start(), inside setup. */
     pub fn new() -> Self {
         let (data_tx, _) = tokio::sync::broadcast::channel(1024);
         let (exit_tx, _) = tokio::sync::broadcast::channel(256);
@@ -140,8 +140,8 @@ impl PtyManager {
     }
 
     /* Connect to (or spawn) the pty host daemon and publish the app handle.
-       Runs inside Tauri's setup; a command that arrives while this is still
-       working waits on the ready gate rather than seeing an empty manager. */
+    Runs inside Tauri's setup; a command that arrives while this is still
+    working waits on the ready gate rather than seeing an empty manager. */
     pub fn start(&self, app: tauri::AppHandle) {
         let _ = self.app.set(app);
         self.connect_with_handshake();
@@ -155,13 +155,13 @@ impl PtyManager {
     }
 
     /* Block until start() has finished. The gate opens even when the
-       handshake failed, so commands then report "PTY host not connected"
-       instead of hanging forever.
+    handshake failed, so commands then report "PTY host not connected"
+    instead of hanging forever.
 
-       The timeout is insurance, not a normal path: the handshake is already
-       bounded (connect 6s + request 15s, at most twice), so this can only
-       fire if start() was never called at all. A command that reports a
-       missing host beats a window that never answers. */
+    The timeout is insurance, not a normal path: the handshake is already
+    bounded (connect 6s + request 15s, at most twice), so this can only
+    fire if start() was never called at all. A command that reports a
+    missing host beats a window that never answers. */
     fn wait_ready(&self) {
         let mut ready = self.ready.lock().unwrap();
         let deadline = std::time::Instant::now() + READY_TIMEOUT;
@@ -177,17 +177,17 @@ impl PtyManager {
     }
 
     /* A daemon outlives app updates and app restarts, so before trusting one
-       check that it speaks this build's protocol and that there is actually
-       something worth keeping in it. A daemon with no live pane is replaced
-       too: it still carries the environment of whatever launch started it,
-       and panes opened now should see this launch's PATH. */
+    check that it speaks this build's protocol and that there is actually
+    something worth keeping in it. A daemon with no live pane is replaced
+    too: it still carries the environment of whatever launch started it,
+    and panes opened now should see this launch's PATH. */
     fn connect_with_handshake(&self) {
         for attempt in 0..2 {
             let (stream, just_spawned) = match connect_host() {
                 Ok(pair) => pair,
                 Err(error) => {
                     /* without a host there are no terminals at all; the
-                       commands that need one report the failure */
+                    commands that need one report the failure */
                     eprintln!("[bentomux] pty host unavailable: {error}");
                     return;
                 }
@@ -206,7 +206,9 @@ impl PtyManager {
                 HostVerdict::Use => return,
                 HostVerdict::Replace(why) => {
                     if attempt == 1 {
-                        eprintln!("[bentomux] pty host still not current ({why}); continuing with it");
+                        eprintln!(
+                            "[bentomux] pty host still not current ({why}); continuing with it"
+                        );
                         return;
                     }
                     eprintln!("[bentomux] restarting pty host ({why})");
@@ -217,9 +219,9 @@ impl PtyManager {
     }
 
     /* stop the daemon and wait for it to stop answering, so the next
-       connect_host() starts a fresh one instead of racing the dying process.
-       Called from connect_with_handshake, so it must not wait on the gate
-       that start() only opens after the handshake returns. */
+    connect_host() starts a fresh one instead of racing the dying process.
+    Called from connect_with_handshake, so it must not wait on the gate
+    that start() only opens after the handshake returns. */
     fn restart_host(&self) {
         self.shutdown_host_now();
         if !crate::pty_host::wait_host_gone(Duration::from_secs(4)) {
@@ -242,8 +244,8 @@ impl PtyManager {
         let (out_tx, out_rx) = mpsc::channel::<String>();
 
         /* A write failure used to be swallowed here, and every later request
-           then sat out the full timeout with nothing in the log. Drop the
-           sender instead, so send() fails immediately and says why. */
+        then sat out the full timeout with nothing in the log. Drop the
+        sender instead, so send() fails immediately and says why. */
         let out_slot = self.out.clone();
         std::thread::spawn(move || {
             while let Ok(line) = out_rx.recv() {
@@ -261,12 +263,12 @@ impl PtyManager {
         let data_tx = self.data_tx.clone();
         let exit_tx = self.exit_tx.clone();
         /* the handle arrives with start(); read it per emit so output that
-           lands before setup finishes is not dropped on the floor */
+        lands before setup finishes is not dropped on the floor */
         let app = self.app.clone();
         let out_slot = self.out.clone();
         /* per-pane coalescing buffers, flushed on a 16 ms cadence by the
-           flusher thread below. data_tx (remote dirty-set, tests) still
-           gets every chunk immediately — only the WebView emit batches. */
+        flusher thread below. data_tx (remote dirty-set, tests) still
+        gets every chunk immediately — only the WebView emit batches. */
         let coalesce: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
         let flush_buffers = coalesce.clone();
         let flush_app = app.clone();
@@ -287,7 +289,7 @@ impl PtyManager {
                 }
             }
             /* no handle yet (start() has not run) and no observers: this
-               transport has nobody to serve, so let the thread end */
+            transport has nobody to serve, so let the thread end */
             if flush_app.get().is_none() && flush_data.receiver_count() == 0 {
                 break;
             }
@@ -301,17 +303,38 @@ impl PtyManager {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {}
                 }
-                let Ok(msg) = serde_json::from_str::<Value>(line.trim()) else { continue };
-                let kind = msg.get("t").and_then(Value::as_str).unwrap_or("").to_string();
-                let id = msg.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                let Ok(msg) = serde_json::from_str::<Value>(line.trim()) else {
+                    continue;
+                };
+                let kind = msg
+                    .get("t")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let id = msg
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                /* Every reply carries the request id, whatever its type, so
+                settle once here instead of once per arm: an arm that
+                forgets silently strands its caller until REQUEST_TIMEOUT
+                (a snapshot reply used to do exactly that, which is why the
+                first watch frame took 15s and then fell back to a blank
+                render). Replies without `n` are the unsolicited hot tick
+                and settle() ignores them. */
+                settle(&pending, &msg);
                 match kind.as_str() {
                     "data" => {
-                        let Some(bytes) = msg.get("data").and_then(Value::as_str).and_then(unb64) else { continue };
+                        let Some(bytes) = msg.get("data").and_then(Value::as_str).and_then(unb64)
+                        else {
+                            continue;
+                        };
                         let chunk = String::from_utf8_lossy(&bytes).into_owned();
                         /* coalesce before the WebView emit; data_tx fans out
-                           from the flusher so ordering per pane is preserved.
-                           The app handle arrives with start(), so read it at
-                           emit time rather than capturing an Option. */
+                        from the flusher so ordering per pane is preserved.
+                        The app handle arrives with start(), so read it at
+                        emit time rather than capturing an Option. */
                         let mut guard = coalesce.lock().unwrap();
                         let entry = guard.entry(id.clone()).or_default();
                         if entry.len() + chunk.len() > PTY_MAX_BUFFER {
@@ -328,11 +351,30 @@ impl PtyManager {
                     }
                     "snapshot" => {
                         let snapshot = crate::terminal::TerminalSnapshot {
-                            text: msg.get("text").and_then(Value::as_str).unwrap_or_default().to_string(),
-                            html: msg.get("html").and_then(Value::as_str).unwrap_or_default().to_string(),
-                            title: msg.get("title").and_then(Value::as_str).unwrap_or_default().to_string(),
-                            progress: msg.get("progress").and_then(Value::as_str).unwrap_or_default().to_string(),
-                            last_data_at: msg.get("lastDataAt").and_then(Value::as_u64).unwrap_or(0),
+                            text: msg
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            html: msg
+                                .get("html")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            title: msg
+                                .get("title")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            progress: msg
+                                .get("progress")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            last_data_at: msg
+                                .get("lastDataAt")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0),
                         };
                         crate::detect::screen::update_snapshot(&id, snapshot);
                     }
@@ -358,20 +400,17 @@ impl PtyManager {
                                 }
                             }
                         }
-                        settle(&pending, &msg);
                     }
                     "spawned" => {
                         if let Some(info) = term_info_from(&msg) {
                             terms.lock().unwrap().insert(info.id.clone(), info);
                         }
-                        settle(&pending, &msg);
                     }
-                    "error" => settle(&pending, &msg),
                     _ => {}
                 }
             }
             /* the daemon is gone: fail fast from here on instead of waiting
-               out a timeout on every request */
+            out a timeout on every request */
             *out_slot.lock().unwrap() = None;
         });
     }
@@ -387,7 +426,8 @@ impl PtyManager {
         };
         let mut line = msg.to_string();
         line.push('\n');
-        tx.send(line).map_err(|e| format!("PTY host write failed: {}", e))
+        tx.send(line)
+            .map_err(|e| format!("PTY host write failed: {}", e))
     }
 
     /* fire-and-forget request that carries a reply id */
@@ -411,25 +451,46 @@ impl PtyManager {
             }
         };
         if reply.get("t").and_then(Value::as_str) == Some("error") {
-            let message = reply.get("message").and_then(Value::as_str).unwrap_or("spawn failed");
+            let message = reply
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("spawn failed");
             return Err(message.to_string());
         }
         Ok(reply)
     }
 
     /* on-demand full snapshot (text+html) for a pane, bypassing the cache.
-       Used by the remote mirror on watch: the 500 ms hot tick is text-only,
-       so a fresh watcher renders html once via the daemon directly. */
+    Used by the remote mirror on watch: the 500 ms hot tick is text-only,
+    so a fresh watcher renders html once via the daemon directly. */
     pub fn snapshot_html(&self, id: &str) -> Option<crate::terminal::TerminalSnapshot> {
-        let reply = self.request(json!({ "t": "snapshot-html", "id": id })).ok()?;
+        let reply = self
+            .request(json!({ "t": "snapshot-html", "id": id }))
+            .ok()?;
         if reply.get("t").and_then(Value::as_str) != Some("snapshot") {
             return None;
         }
         Some(crate::terminal::TerminalSnapshot {
-            text: reply.get("text").and_then(Value::as_str).unwrap_or_default().to_string(),
-            html: reply.get("html").and_then(Value::as_str).unwrap_or_default().to_string(),
-            title: reply.get("title").and_then(Value::as_str).unwrap_or_default().to_string(),
-            progress: reply.get("progress").and_then(Value::as_str).unwrap_or_default().to_string(),
+            text: reply
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            html: reply
+                .get("html")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            title: reply
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            progress: reply
+                .get("progress")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
             last_data_at: reply.get("lastDataAt").and_then(Value::as_u64).unwrap_or(0),
         })
     }
@@ -462,13 +523,13 @@ impl PtyManager {
     }
 
     /* openTabs were persisted with their old ids. A pane whose shell is still
-       running in the daemon is reattached as-is (that is the whole point of
-       the daemon); anything else gets a fresh shell under a new id. */
+    running in the daemon is reattached as-is (that is the whole point of
+    the daemon); anything else gets a fresh shell under a new id. */
     pub fn restore_terms(&self, workspaces: &[WorkspaceRec], open_tabs: &[TabRec]) -> Vec<TabRec> {
         /* Without this the restore can run before the transport exists:
-           host_terms() would fail, the live list would read empty, and every
-           persisted tab would be replaced with a fresh shell — orphaning the
-           panes still running in the daemon. */
+        host_terms() would fail, the live list would read empty, and every
+        persisted tab would be replaced with a fresh shell — orphaning the
+        panes still running in the daemon. */
         self.wait_ready();
         let live = match self.host_terms() {
             Ok(live) => live,
@@ -480,7 +541,9 @@ impl PtyManager {
         let mut claimed: HashSet<String> = HashSet::new();
         let mut created = Vec::new();
         for tab in open_tabs {
-            let Some(ws) = workspaces.iter().find(|w| w.id == tab.workspace_id) else { continue };
+            let Some(ws) = workspaces.iter().find(|w| w.id == tab.workspace_id) else {
+                continue;
+            };
             let tree: PaneNode = tab.split_tree.clone().unwrap_or_else(|| leaf_node(&tab.id));
             let mut map = HashMap::new();
             for old in leaf_ids(&tree) {
@@ -536,8 +599,8 @@ impl PtyManager {
             });
         }
         /* panes nothing claimed are leftovers from a tab the user closed in a
-           previous run; leaving them would be a shell leak with no way to see
-           it, so they go now */
+        previous run; leaving them would be a shell leak with no way to see
+        it, so they go now */
         for id in live.keys() {
             if !claimed.contains(id) {
                 self.kill_term(id);
@@ -634,7 +697,7 @@ impl PtyManager {
     }
 
     /* the daemon outlives the app, but it cannot outlive the binary being
-       replaced on disk: used right before an update installs */
+    replaced on disk: used right before an update installs */
     pub fn shutdown_host(&self) {
         self.wait_ready();
         self.shutdown_host_now();
@@ -646,9 +709,14 @@ impl PtyManager {
     }
 }
 
-fn term_info_from(value: &Value) -> Option<TermInfo> {    Some(TermInfo {
+fn term_info_from(value: &Value) -> Option<TermInfo> {
+    Some(TermInfo {
         id: value.get("id")?.as_str()?.to_string(),
-        workspace_id: value.get("workspaceId").and_then(Value::as_str).unwrap_or("").to_string(),
+        workspace_id: value
+            .get("workspaceId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
         pid: value.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32,
         alive: value.get("alive").and_then(Value::as_bool).unwrap_or(true),
     })
@@ -656,7 +724,9 @@ fn term_info_from(value: &Value) -> Option<TermInfo> {    Some(TermInfo {
 
 /* hand a reply to whoever is blocked on its request id */
 fn settle(pending: &Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>>, msg: &Value) {
-    let Some(n) = msg.get("n").and_then(Value::as_u64) else { return };
+    let Some(n) = msg.get("n").and_then(Value::as_u64) else {
+        return;
+    };
     let tx = pending.lock().unwrap().remove(&n);
     if let Some(tx) = tx {
         let _ = tx.send(msg.clone());
@@ -664,10 +734,10 @@ fn settle(pending: &Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>>, msg: &Value) 
 }
 
 /* 't-' + millis in base36 + a per-process counter, padded to the same 4 chars
-   the TS version's random suffix had. The counter replaced 4 random base36
-   chars because those collide by the birthday problem: 100 ids out of 36^4
-   fail ~0.3% of the time, and a collision means two panes share one id. The
-   daemon is the only caller, so a counter is unique for as long as ids live. */
+the TS version's random suffix had. The counter replaced 4 random base36
+chars because those collide by the birthday problem: 100 ids out of 36^4
+fail ~0.3% of the time, and a collision means two panes share one id. The
+daemon is the only caller, so a counter is unique for as long as ids live. */
 pub fn new_term_id() -> String {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let millis = (chrono::Utc::now().timestamp_millis().max(0)) as u64;
@@ -680,11 +750,15 @@ pub fn new_term_id() -> String {
 }
 
 /* legacy tabs whose tree is absent still resolve through treeFromLegacy in
-   state.rs; this helper is kept for callers that need the same shape */
+state.rs; this helper is kept for callers that need the same shape */
 pub fn legacy_tree(ids: &[String], stacked: bool) -> Option<PaneNode> {
     tree_from_legacy(
         ids,
-        Some(if stacked { crate::split_tree::Dir::H } else { crate::split_tree::Dir::V }),
+        Some(if stacked {
+            crate::split_tree::Dir::H
+        } else {
+            crate::split_tree::Dir::V
+        }),
     )
 }
 
@@ -694,7 +768,7 @@ mod tests {
     use crate::pty_host;
 
     /* a private daemon per test: bind first so the test knows the real port,
-       then hand the listener to the server. No fixed port, no bind race. */
+    then hand the listener to the server. No fixed port, no bind race. */
     struct TestHost {
         addr: std::net::SocketAddr,
         token: String,
@@ -710,7 +784,7 @@ mod tests {
         });
         let host = TestHost { addr, token };
         /* the accept loop is already listening; retry only guards the first
-           moment of the server thread starting up */
+        moment of the server thread starting up */
         let mut last = String::new();
         for _ in 0..300 {
             match pty_host::connect_at(host.addr, &host.token) {
@@ -733,7 +807,7 @@ mod tests {
         let manager = PtyManager::new();
         manager.attach_transport(stream);
         /* tests hand the transport over directly, so the manager is ready
-           without the start() handshake */
+        without the start() handshake */
         manager.open_gate();
         manager
     }
@@ -750,7 +824,11 @@ mod tests {
     }
 
     fn ws(id: &str) -> WorkspaceRec {
-        WorkspaceRec { id: id.into(), path: temp_dir(id), name: id.into() }
+        WorkspaceRec {
+            id: id.into(),
+            path: temp_dir(id),
+            name: id.into(),
+        }
     }
 
     #[test]
@@ -768,16 +846,18 @@ mod tests {
 
         let workspace = ws("spawn");
         /* windows: cmd starts instantly and skips user pwsh profiles; unix:
-           the detected default (bash) as before */
+        the detected default (bash) as before */
         let shell_pref = if cfg!(windows) { Some("cmd") } else { None };
-        let id = mgr.create_term(&workspace.id, &workspace.path, shell_pref).expect("spawn");
+        let id = mgr
+            .create_term(&workspace.id, &workspace.path, shell_pref)
+            .expect("spawn");
 
         let info = mgr.get_term(&id).expect("term registered");
         assert!(info.alive);
         assert!(info.pid > 0);
 
         /* echo a marker and expect it back through the pty. Reading
-           accumulates every chunk because one echoed line arrives split. */
+        accumulates every chunk because one echoed line arrives split. */
         let command = "echo BENTOMUX_TEST_MARKER\r\n";
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut seen = String::new();
@@ -823,18 +903,21 @@ mod tests {
     }
 
     /* the feature this daemon exists for: quitting the app must not take the
-       agent CLIs with it, and the next launch must find them again */
+    agent CLIs with it, and the next launch must find them again */
     #[test]
     fn test_terms_survive_client_restart() {
         let (host, mgr) = test_manager("survive");
         let workspace = ws("survive");
         let shell_pref = if cfg!(windows) { Some("cmd") } else { None };
-        let id = mgr.create_term(&workspace.id, &workspace.path, shell_pref).expect("spawn");
+        let id = mgr
+            .create_term(&workspace.id, &workspace.path, shell_pref)
+            .expect("spawn");
         let pid = mgr.get_term(&id).expect("registered").pid;
 
         /* leave a marker on the pane's screen, then let it settle */
         let marker = "BENTOMUX_SURVIVOR\r\n";
-        mgr.write_term(&id, &format!("echo {marker}")).expect("write");
+        mgr.write_term(&id, &format!("echo {marker}"))
+            .expect("write");
         std::thread::sleep(Duration::from_millis(1500));
 
         /* the app "quits": drop the whole manager, socket and all */
@@ -850,7 +933,10 @@ mod tests {
         }];
         let restored = second.restore_terms(&[workspace.clone()], &tabs);
         assert_eq!(restored.len(), 1);
-        assert_eq!(restored[0].id, id, "reattached to the live pane, not a fresh shell");
+        assert_eq!(
+            restored[0].id, id,
+            "reattached to the live pane, not a fresh shell"
+        );
 
         let info = second.get_term(&id).expect("term still known");
         assert!(info.alive, "pane must still be running");
@@ -870,7 +956,10 @@ mod tests {
                 Err(_) => break,
             }
         }
-        assert!(seen.contains("BENTOMUX_SURVIVOR"), "replay missing; saw {seen:?}");
+        assert!(
+            seen.contains("BENTOMUX_SURVIVOR"),
+            "replay missing; saw {seen:?}"
+        );
 
         second.kill_term(&id);
     }
@@ -879,9 +968,17 @@ mod tests {
     fn test_two_panes_survive_ten_reconnect_cycles() {
         let (host, first) = test_manager("reconnect-10x");
         let workspace = ws("reconnect-10x");
-        let shell_pref = if cfg!(windows) { Some("cmd") } else { Some("pi") };
-        let left = first.create_term(&workspace.id, &workspace.path, shell_pref).expect("left Pi spawn");
-        let right = first.create_term(&workspace.id, &workspace.path, shell_pref).expect("right Pi spawn");
+        let shell_pref = if cfg!(windows) {
+            Some("cmd")
+        } else {
+            Some("pi")
+        };
+        let left = first
+            .create_term(&workspace.id, &workspace.path, shell_pref)
+            .expect("left Pi spawn");
+        let right = first
+            .create_term(&workspace.id, &workspace.path, shell_pref)
+            .expect("right Pi spawn");
         let left_pid = first.get_term(&left).expect("left registered").pid;
         let right_pid = first.get_term(&right).expect("right registered").pid;
         let tree = crate::split_tree::split_leaf(
@@ -907,23 +1004,38 @@ mod tests {
             let restored_tree = restored[0].split_tree.as_ref().expect("split preserved");
             let leaves = crate::split_tree::leaf_ids(restored_tree);
             assert_eq!(leaves.len(), 2, "pane count changed on cycle {cycle}");
-            assert!(leaves.contains(&left) && leaves.contains(&right), "pane ids changed on cycle {cycle}: {leaves:?}");
-            assert_eq!(next.get_term(&left).expect("left after restore").pid, left_pid);
-            assert_eq!(next.get_term(&right).expect("right after restore").pid, right_pid);
+            assert!(
+                leaves.contains(&left) && leaves.contains(&right),
+                "pane ids changed on cycle {cycle}: {leaves:?}"
+            );
+            assert_eq!(
+                next.get_term(&left).expect("left after restore").pid,
+                left_pid
+            );
+            assert_eq!(
+                next.get_term(&right).expect("right after restore").pid,
+                right_pid
+            );
 
             let mut data_rx = next.on_term_data();
             let left_marker = format!("BENTOMUX_RECONNECT_LEFT_{cycle}");
             let right_marker = format!("BENTOMUX_RECONNECT_RIGHT_{cycle}");
-            next.write_term(&left, &format!("echo {left_marker}\r\n")).expect("left write");
-            next.write_term(&right, &format!("echo {right_marker}\r\n")).expect("right write");
+            next.write_term(&left, &format!("echo {left_marker}\r\n"))
+                .expect("left write");
+            next.write_term(&right, &format!("echo {right_marker}\r\n"))
+                .expect("right write");
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
             let mut left_seen = false;
             let mut right_seen = false;
             while !(left_seen && right_seen) && std::time::Instant::now() < deadline {
                 match data_rx.try_recv() {
                     Ok((id, chunk)) => {
-                        if id == left && chunk.contains(&left_marker) { left_seen = true; }
-                        if id == right && chunk.contains(&right_marker) { right_seen = true; }
+                        if id == left && chunk.contains(&left_marker) {
+                            left_seen = true;
+                        }
+                        if id == right && chunk.contains(&right_marker) {
+                            right_seen = true;
+                        }
                     }
                     Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
                         std::thread::sleep(Duration::from_millis(25));
@@ -932,7 +1044,10 @@ mod tests {
                     Err(_) => break,
                 }
             }
-            assert!(left_seen && right_seen, "markers missing on cycle {cycle}: left={left_seen}, right={right_seen}");
+            assert!(
+                left_seen && right_seen,
+                "markers missing on cycle {cycle}: left={left_seen}, right={right_seen}"
+            );
             current = Some(next);
         }
 
@@ -950,18 +1065,24 @@ mod tests {
         /* a daemon we just started is current by definition */
         assert_eq!(host_verdict(PROTOCOL_VERSION, 0, true), Use);
         /* a leftover daemon with nothing to preserve: refresh it so new panes
-           get this launch's environment */
-        assert_eq!(host_verdict(PROTOCOL_VERSION, 0, false), Replace("no live panes"));
+        get this launch's environment */
+        assert_eq!(
+            host_verdict(PROTOCOL_VERSION, 0, false),
+            Replace("no live panes")
+        );
         /* any other protocol is refused, panes or not */
-        assert_eq!(host_verdict(PROTOCOL_VERSION + 1, 3, false), Replace("protocol mismatch"));
+        assert_eq!(
+            host_verdict(PROTOCOL_VERSION + 1, 3, false),
+            Replace("protocol mismatch")
+        );
         assert_eq!(host_verdict(0, 3, false), Replace("protocol mismatch"));
         assert_eq!(host_verdict(0, 0, true), Replace("protocol mismatch"));
     }
 
     /* The manager is managed on the Tauri Builder, before the window exists,
-       so a command can arrive while start() is still doing the daemon
-       handshake. Those commands must wait for the transport, not run against
-       an empty manager. */
+    so a command can arrive while start() is still doing the daemon
+    handshake. Those commands must wait for the transport, not run against
+    an empty manager. */
     #[test]
     fn test_commands_wait_for_the_ready_gate() {
         let (host, mgr) = test_manager("ready-gate");
@@ -972,11 +1093,14 @@ mod tests {
         let waiter = pending.clone();
         let joined = std::thread::spawn(move || {
             /* this would return an empty vec immediately if the gate were
-               missing; with it, the call parks until the gate opens */
+            missing; with it, the call parks until the gate opens */
             waiter.live_terms()
         });
         std::thread::sleep(Duration::from_millis(150));
-        assert!(!joined.is_finished(), "live_terms must block while the gate is closed");
+        assert!(
+            !joined.is_finished(),
+            "live_terms must block while the gate is closed"
+        );
         pending.open_gate();
         let terms = joined.join().expect("waiter thread");
         assert!(terms.is_empty(), "no terms are known before the handshake");
@@ -984,20 +1108,24 @@ mod tests {
         /* once started, the same call sees the live pane without delay */
         let workspace = ws("ready-gate");
         let shell_pref = if cfg!(windows) { Some("cmd") } else { None };
-        let id = mgr.create_term(&workspace.id, &workspace.path, shell_pref).expect("spawn");
+        let id = mgr
+            .create_term(&workspace.id, &workspace.path, shell_pref)
+            .expect("spawn");
         assert!(mgr.live_terms().iter().any(|t| t.id == id));
         mgr.kill_term(&id);
         drop(host);
     }
 
     /* a reconnecting app must not be streamed panes it has not asked for: the
-       chunks would reach the renderer before the replay `attach` sends */
+    chunks would reach the renderer before the replay `attach` sends */
     #[test]
     fn test_reconnected_client_is_not_streamed_before_attach() {
         let (host, first) = test_manager("attach-reset");
         let workspace = ws("attach-reset");
         let shell_pref = if cfg!(windows) { Some("cmd") } else { None };
-        let id = first.create_term(&workspace.id, &workspace.path, shell_pref).expect("spawn");
+        let id = first
+            .create_term(&workspace.id, &workspace.path, shell_pref)
+            .expect("spawn");
         let mut first_rx = first.on_term_data();
         first.write_term(&id, "echo FIRST\r\n").expect("write");
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -1011,10 +1139,13 @@ mod tests {
                 Err(_) => break,
             }
         }
-        assert!(seen.contains("FIRST"), "pane never produced output; saw {seen:?}");
+        assert!(
+            seen.contains("FIRST"),
+            "pane never produced output; saw {seen:?}"
+        );
 
         /* the app "quits" and a new one connects and lists, but does not
-           attach yet */
+        attach yet */
         drop(first);
         let second = connect_test_manager(&host);
         let live = second.host_terms().expect("list");
@@ -1057,7 +1188,9 @@ mod tests {
     fn test_resize_and_unknown_term_errors() {
         let (_host, mgr) = test_manager("resize");
         let workspace = ws("resize");
-        let id = mgr.create_term(&workspace.id, &workspace.path, None).expect("spawn");
+        let id = mgr
+            .create_term(&workspace.id, &workspace.path, None)
+            .expect("spawn");
 
         mgr.resize_term(&id, 100, 30).expect("resize");
         /* unknown terms resize as a no-op, write as an error (like TS) */
@@ -1094,7 +1227,10 @@ mod tests {
         let tree = tab.split_tree.as_ref().expect("split preserved");
         let leaves = leaf_ids(tree);
         assert_eq!(leaves.len(), 2);
-        assert!(leaves.iter().all(|l| mgr.get_term(l).is_some()), "fresh panes registered");
+        assert!(
+            leaves.iter().all(|l| mgr.get_term(l).is_some()),
+            "fresh panes registered"
+        );
         assert!(!leaves.contains(&"old-a".to_string()));
         assert_eq!(tab.id, first_leaf_id(tree));
 
@@ -1112,7 +1248,7 @@ mod tests {
         assert!(mgr.get_term(&restored[0].id).is_some());
 
         /* unknown workspace tabs are skipped, and their panes are not left
-           running in the daemon */
+        running in the daemon */
         let orphan = TabRec {
             id: "z1".into(),
             workspace_id: "ws-gone".into(),
@@ -1147,5 +1283,40 @@ mod tests {
         assert!(ids.iter().all(|id| id.starts_with("t-")));
         let uniq: std::collections::HashSet<&String> = ids.iter().collect();
         assert_eq!(uniq.len(), 100);
+    }
+
+    /* Every reply carries the request id, whatever its type. Settling only
+    the arms that used to ask for something left the snapshot reply out,
+    and the caller sat out the full REQUEST_TIMEOUT — the first watch
+    frame on a phone took 15s and then fell back to a blank render. */
+    #[test]
+    fn a_reply_of_any_type_settles_the_waiter() {
+        let pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) = mpsc::channel();
+        pending.lock().unwrap().insert(7, tx);
+
+        settle(
+            &pending,
+            &serde_json::json!({"t": "snapshot", "n": 7, "html": "<b>"}),
+        );
+        let reply = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the snapshot reply must reach the caller, not time out");
+        assert_eq!(reply["html"], "<b>");
+        assert!(
+            pending.lock().unwrap().is_empty(),
+            "the waiter stays behind"
+        );
+
+        /* the hot tick sends snapshots with no id at all: that is a broadcast,
+        not an answer, and it must not disturb the waiters */
+        let (tx2, _rx2) = mpsc::channel();
+        pending.lock().unwrap().insert(8, tx2);
+        settle(
+            &pending,
+            &serde_json::json!({"t": "snapshot", "id": "t-1", "text": "hi"}),
+        );
+        assert_eq!(pending.lock().unwrap().len(), 1);
     }
 }
